@@ -1,0 +1,3585 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import scipy.interpolate
+from scipy.spatial import distance
+from scipy import ndimage
+from scipy.signal import savgol_filter
+from PIL import Image, ImageDraw
+from skimage import measure
+from skimage import morphology
+from matplotlib.colors import LinearSegmentedColormap
+import math
+import time, sys
+import numba
+import matplotlib.colors as mcolors
+import matplotlib.gridspec as gridspec
+from matplotlib import cm
+import pdb
+import os
+import re
+from mpl_toolkits.mplot3d import Axes3D
+import pickle as pickle
+
+def update_progress(progress):
+    """progress bar from https://stackoverflow.com/questions/3160699/python-progress-bar
+    update_progress() : Displays or updates a console progress bar
+    Accepts a float between 0 and 1. Any int will be converted to a float.
+    A value under 0 represents a 'halt'.
+    A value at 1 or bigger represents 100%"""
+    barLength = 20 # Modify this to change the length of the progress bar
+    status = ""
+    if isinstance(progress, int):
+        progress = float(progress)
+    if not isinstance(progress, float):
+        progress = 0
+        status = "error: progress var must be float\r\n"
+    if progress < 0:
+        progress = 0
+        status = "Halt...\r\n"
+    if progress >= 1:
+        progress = 1
+        status = "Done...\r\n"
+    block = int(round(barLength*progress))
+    text = "\rPercent: [{0}] {1}% {2}".format( "#"*block + "-"*(barLength-block), progress*100, status)
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+class Channel:
+    """class for Channel objects"""
+    #def __init__(self,x,y,z,W,D,sinuosity):
+    def __init__(self,x,y,z,W,D):
+        """initialize Channel object
+        x, y, z  - coordinates of centerline
+        W - channel width
+        D - channel depth"""
+        self.x = x
+        self.y = y
+        self.z = z
+        self.W = W
+        self.D = D
+        #self.sinuosity=sinuosity
+
+    #@classmethod
+    def Calculate_Sinuosity_and_Slopes(self):
+
+       #for obj in cls.objs:
+        #Dont use x,y,z use self.x, self.y. self.z 
+        #for obj in cls.objs:
+        x=self.x
+        y=self.y
+        z=self.z
+
+        dx, dy, dz, ds, s = compute_derivatives(x,y,z)
+
+        sinuosity = s[-1]/(x[-1]-x[0])
+
+        AlongChannelSlope=dz/ds
+
+        AverageChannelSlope=(z[0]-z[-1])/s[-1]
+
+
+
+        return sinuosity,AlongChannelSlope,AverageChannelSlope
+
+
+class Cutoff:
+    """class for Cutoff objects"""
+    def __init__(self,x,y,z,W,D):
+        """initialize Cutoff object
+        x, y, z  - coordinates of centerline
+        W - channel width
+        D - channel depth"""
+        self.x = x
+        self.y = y
+        self.z = z
+        self.W = W
+        self.D = D
+
+
+#class MTD:
+   # """class for MTD objects"""
+    #def __init__(self,x,y,z,W,D,sinuosity):
+    #def __init__(self,x,y,z,W,D):
+        """initialize MTD object
+        x, y, z  - coordinates of centerline
+        W - channel width
+        D - channel depth"""
+    #    self.x = x
+    #   self.y = y
+    #    self.z = z
+    #    self.W = W
+    #    self.D = D
+
+class ChannelBelt3D:
+    """class for 3D models of channel belts"""
+    def __init__(self, model_type, topo, strat, facies, facies_code, dx, channels):
+        """model_type - can be either 'fluvial' or 'submarine'
+        topo - set of topographic surfaces (3D numpy array)
+        strat - set of stratigraphic surfaces (3D numpy array)
+        facies - facies volume (3D numpy array)
+        facies_code - dictionary of facies codes, e.g. {0:'oxbow', 1:'point bar', 2:'levee'}
+        dx - gridcell size (m)
+        channels - list of channel objects that form 3D model
+        
+        
+        MTDs - list of MTD objects that form 3D model"""
+        self.model_type = model_type
+        self.topo = topo
+        self.strat = strat
+        self.facies = facies
+        self.facies_code = facies_code
+        self.dx = dx
+        self.channels = channels
+        ###
+        #self.MTDs=MTDs
+
+    def plot_xsection_PM(self, xsec, ve):
+        """method for plotting a cross section through a 3D model; also plots map of
+        basal erosional surface and map of final geomorphic surface
+        xsec - location of cross section along the x-axis (in pixel/ voxel coordinates)
+        ve - vertical exaggeration"""
+        strat = self.strat
+        dx = self.dx
+        fig1 = plt.figure(figsize=(20,5))
+        ax1 = fig1.add_subplot(111)
+        r,c,ts = np.shape(strat)
+        Xv = dx * np.arange(0,r)
+        for xloc in range(xsec,xsec+1,1):
+            for i in range(0,ts-1,3):
+                X1 = np.concatenate((Xv, Xv[::-1]))
+                Y1 = np.concatenate((strat[:,xloc,i], strat[::-1,xloc,i+1]))
+                Y2 = np.concatenate((strat[:,xloc,i+1], strat[::-1,xloc,i+2]))
+                Y3 = np.concatenate((strat[:,xloc,i+2], strat[::-1,xloc,i+3]))
+                if self.model_type == 'submarine':
+                    ax1.fill(X1, Y1, facecolor=[0.5,0.5,0.5], linewidth=0.1, edgecolor=[0.5,0.5,0.5])# [0,0,0]) # I think this is Levee PM
+                    ax1.fill(X1, Y2, facecolor=[0.5,0.5,0.5], linewidth=0.1, edgecolor=[0.5,0.5,0.5]) #=[0,0,0]) # oxbow mud
+                    ax1.fill(X1, Y3, facecolor=[0.9,0.9,0], linewidth=0.1,edgecolor=[0.5,0.5,0.5]) # CHANNEL SAND #edgecolor of 0.5,0.5,0.5 disguises the levees 
+                if self.model_type == 'fluvial':
+                    ax1.fill(X1, Y1, facecolor=[0.5,0.25,0], linewidth=0, edgecolor=[0,0,0]) # levee mud
+                    ax1.fill(X1, Y2, facecolor=[0.9,0.9,0], linewidth=0, edgecolor=[0,0,0]) # oxbow mud
+                    ax1.fill(X1, Y3, facecolor=[0.5,0.25,0], linewidth=0) # channel sand
+            ax1.set_xlim(0,dx*(r-1))
+            ax1.set_aspect(ve, adjustable='datalim')
+        fig2 = plt.figure()
+        ax2 = fig2.add_subplot(111)
+        ax2.contourf(strat[:,:,ts-1],100,cmap='viridis')
+        ax2.contour(strat[:,:,ts-1],100,colors='k',linestyles='solid',linewidths=0.1,alpha=0.4)
+        ax2.plot([xloc, xloc],[0,r],'k',linewidth=2)
+        ax2.axis([0,c,0,r])
+        ax2.set_aspect('equal', adjustable='box')
+        ax2.set_title('final geomorphic surface')
+        ax2.tick_params(bottom=False,top=False,left=False,right=False,labelbottom=False,labelleft=False)
+        fig3 = plt.figure()
+        ax3 = fig3.add_subplot(111)
+        ax3.contourf(strat[:,:,0],100,cmap='viridis')
+        ax3.contour(strat[:,:,0],100,colors='k',linestyles='solid',linewidths=0.1,alpha=0.4)
+        ax3.plot([xloc, xloc],[0,r],'k',linewidth=2)
+        ax3.axis([0,c,0,r])
+        ax3.set_aspect('equal', adjustable='box')
+        ax3.set_title('basal erosional surface')
+        ax3.tick_params(bottom=False,top=False,left=False,right=False,labelbottom=False,labelleft=False)
+        
+        return fig1,fig2,fig3
+
+
+    def plot_xsection_PM_MTD(self, xsec, ve,indices):
+        """method for plotting a cross section through a 3D model; also plots map of
+        basal erosional surface and map of final geomorphic surface
+        xsec - location of cross section along the x-axis (in pixel/ voxel coordinates)
+        ve - vertical exaggeration"""
+        strat = self.strat
+        dx = self.dx
+        fig1 = plt.figure(figsize=(20,5))
+        ax1 = fig1.add_subplot(111)
+        r,c,ts = np.shape(strat)
+        Xv = dx * np.arange(0,r)
+        
+        for xloc in range(xsec,xsec+1,1):
+            j=range(0,ts-1,3)
+            for count, i in enumerate(j):
+                X1 = np.concatenate((Xv, Xv[::-1]))
+                Y1 = np.concatenate((strat[:,xloc,i], strat[::-1,xloc,i+1]))
+                Y2 = np.concatenate((strat[:,xloc,i+1], strat[::-1,xloc,i+2]))
+                Y3 = np.concatenate((strat[:,xloc,i+2], strat[::-1,xloc,i+3]))
+                #pdb.set_trace()
+                if np.in1d(count,indices)[0]==True:
+                    
+                    ######## FILL MTD CHANNEL IN GREEN ############
+                    ax1.fill(X1, Y1, facecolor=[0.5,0.5,0.5], linewidth=0.1, edgecolor=[0.5,0.5,0.5])# [0,0,0]) # I think this is Levee PM
+                    ax1.fill(X1, Y2, facecolor=[0.5,0.5,0.5], linewidth=0.1, edgecolor=[0.5,0.5,0.5]) #=[0,0,0]) # oxbow mud
+                    ax1.fill(X1, Y3, facecolor='xkcd:green', linewidth=0.1,edgecolor=[0.5,0.5,0.5]) # CHANNEL SAND #edgecolor of 0.5,0.5,0.5 disguises the levees 
+
+                elif self.model_type == 'submarine':
+                    ax1.fill(X1, Y1, facecolor=[0.5,0.5,0.5], linewidth=0.0001, edgecolor=[0,0,0]) #edgecolor=[0.5,0.5,0.5])# [0,0,0]) # I think this is Levee PM #linewidth was 0.1
+                    ax1.fill(X1, Y2, facecolor=[0.5,0.5,0.5], linewidth=0.0001, edgecolor=[0,0,0]) #edgecolor=[0.5,0.5,0.5]) #=[0,0,0]) # oxbow mud
+                    ax1.fill(X1, Y3, facecolor=[0.9,0.9,0], linewidth=0.0001, edgecolor=[0,0,0]) #edgecolor=[0.5,0.5,0.5]) # CHANNEL SAND #edgecolor of 0.5,0.5,0.5 disguises the levees  facecolor=[0.9,0.9,0]
+
+                elif self.model_type == 'fluvial':
+                    ax1.fill(X1, Y1, facecolor=[0.5,0.25,0], linewidth=0, edgecolor=[0,0,0]) # levee mud
+                    ax1.fill(X1, Y2, facecolor=[0.9,0.9,0], linewidth=0, edgecolor=[0,0,0]) # oxbow mud
+                    ax1.fill(X1, Y3, facecolor=[0.5,0.25,0], linewidth=0) # channel sand
+            ax1.set_xlim(0,dx*(r-1))
+            ax1.set_aspect(ve, adjustable='datalim')
+        fig2 = plt.figure()
+        ax2 = fig2.add_subplot(111)
+        ax2.contourf(strat[:,:,ts-1],100,cmap='viridis')
+        ax2.contour(strat[:,:,ts-1],100,colors='k',linestyles='solid',linewidths=0.1,alpha=0.4)
+        ax2.plot([xloc, xloc],[0,r],'k',linewidth=2)
+        ax2.axis([0,c,0,r])
+        ax2.set_aspect('equal', adjustable='box')
+        ax2.set_title('final geomorphic surface')
+        ax2.tick_params(bottom=False,top=False,left=False,right=False,labelbottom=False,labelleft=False)
+        fig3 = plt.figure()
+        ax3 = fig3.add_subplot(111)
+        ax3.contourf(strat[:,:,0],100,cmap='viridis')
+        ax3.contour(strat[:,:,0],100,colors='k',linestyles='solid',linewidths=0.1,alpha=0.4)
+        ax3.plot([xloc, xloc],[0,r],'k',linewidth=2)
+        ax3.axis([0,c,0,r])
+        ax3.set_aspect('equal', adjustable='box')
+        ax3.set_title('basal erosional surface')
+        ax3.tick_params(bottom=False,top=False,left=False,right=False,labelbottom=False,labelleft=False)
+        
+        return fig1,fig2,fig3
+
+
+    def plot_top_and_bottom_surfaces(self,ci):
+
+        strat = self.strat
+        topo = self.topo
+
+        #fig = plt.figure(figsize=(10,10))
+        #gs = gridspec.GridSpec(1,1)
+        #ax1 = fig.add_subplot(gs[0,:])
+       # ax2 = fig.add_subplot(gs[1,:])
+
+        fig = plt.figure(figsize=(10,10))
+        gs = gridspec.GridSpec(1,1)
+        ax1 = fig.add_subplot(gs[0,:])
+    # ax2 = fig.add_subplot(gs[1,:])
+        
+        r,c,ts = np.shape(strat)
+
+        s,d,tt=np.shape(topo)
+        
+        #pdb.set_trace()
+        #contours=np.arange(np.min(topo[:,:,ts-1]),np.max(topo[:,:,ts-1])+ci,ci)
+        #contours=np.arange(-340,180,5)#USE FOR CONSISTENT COLOR SCALE #240, -340
+
+        #contours=np.arange(-420,180,5)  #This is to MAKE THE BASAL EROSIVE SURFACE LIGHTER!
+        
+        contours=np.arange(-420,300,5)
+
+        Final_Geomorphic_Surface=ax1.contourf(topo[:,:,tt-1],contours,cmap='viridis')
+
+        #line_contours=np.arange(-340,180,ci)
+
+        line_contours=np.arange(-340,300,ci)
+
+        ax1.contour(topo[:,:,tt-1],line_contours,colors='k',linestyles='solid',linewidth=0.1,alpha=0.4)
+        #plt.colorbar(Final_Geomorphic_Surface)
+        #ax1.plot([xloc, xloc],[0,r],'k',linewidth=2)
+        ax1.axis([0,d,0,s])
+        ax1.set_aspect('equal', adjustable='box')        
+        #ax1.set_title('final geomorphic surface')
+        ax1.tick_params(bottom='off',top='off',left='off',right='off',labelbottom='off',labelleft='off')
+        plt.tight_layout()
+        #ax2.contourf(strat[:,:,0],100,cmap='viridis')
+        #ax2.contour(strat[:,:,0],100,colors='k',linestyles='solid',linewidth=0.1,alpha=0.4)
+        #ax2.plot([xloc, xloc],[0,r],'k',linewidth=2)
+        #ax2.axis([0,c,0,r])
+        #ax2.set_aspect('equal', adjustable='box')
+        #ax2.set_title('basal erosional surface')
+        #ax2.tick_params(bottom='off',top='off',left='off',right='off',labelbottom='off',labelleft='off')
+        
+
+        #########BASAL EROSIVE SURFACE#############
+        fig = plt.figure(figsize=(10,10))
+        gs = gridspec.GridSpec(1,1)
+        ax2 = fig.add_subplot(gs[0,:])
+        #contours2=np.arange(np.min(strat[:,:,0]),np.max(strat[:,:,0])+ci,ci)
+        #ax2.contourf(strat[:,:,0],contours2,cmap='viridis')
+        #ax2.contour(strat[:,:,0],contours2,colors='k',linestyles='solid',linewidth=0.1,alpha=0.4)
+        
+        ax2.contourf(strat[:,:,0],contours,cmap='viridis')
+        ax2.contour(strat[:,:,0],line_contours,colors='k',linestyles='solid',linewidth=0.1,alpha=0.4)
+        #ax2.plot([xloc, xloc],[0,r],'k',linewidth=2)
+        ax2.axis([0,c,0,r])
+        ax2.set_aspect('equal', adjustable='box')
+        #ax2.set_title('basal erosional surface')
+        ax2.tick_params(bottom='off',top='off',left='off',right='off',labelbottom='off',labelleft='off')
+        plt.tight_layout()
+        
+        
+        fig=plt.figure(figsize=(10,10))
+        #cbar=plt.colorbar(Final_Geomorphic_Surface)
+
+        #cbar = fig.colorbar(Final_Geomorphic_Surface, ticks=[-300,-240,-180,-120,-60,0,60,120,180], orientation='horizontal')
+        cbar = fig.colorbar(Final_Geomorphic_Surface, ticks=[-420,-360,-300,-240,-180,-120,-60,0,60,120,180,240,300], orientation='horizontal')
+        #cbar.set_label('Elevation (m)')
+        plt.tight_layout()
+
+        #print(np.max(topo[:,:,ts-1]))
+        print(f'Max Final Geomorphic Depth is {np.max(strat[:,:,ts-1])}')
+        print(f'Min Final Geomorphic Depth is {np.min(strat[:,:,ts-1])}')
+
+        print(f'Min Basal Erosive Surface Depth is {np.min(strat[:,:,0])}')
+
+
+        #print(np.max(strat[:,:,ts-1]))
+        #print(np.min(strat[:,:,0]))
+
+        
+        #return fig
+    
+
+    #def plot_top_and_bottom_surfaces(self):
+
+     #   strat = self.strat
+      #  topo = self.topo
+
+        #fig = plt.figure(figsize=(10,10))
+        #gs = gridspec.GridSpec(1,1)
+        #ax1 = fig.add_subplot(gs[0,:])
+       # ax2 = fig.add_subplot(gs[1,:])
+
+       # r,c,ts = np.shape(strat)
+
+        #fig1 = plt.figure(figsize=(10,10))
+        #ax1 = fig1.add_subplot(111)
+        #ax1.tick_params(bottom='off',top='off',left='off',right='off',labelbottom='off',labelleft='off')
+        #ax1.contourf(strat[:,:,ts-1],100,cmap='viridis')
+        #ax1.contour(strat[:,:,ts-1],100,colors='k',linestyles='solid',linewidths=0.1,alpha=0.4)
+        #ax1.axis([0,c,0,r])
+        #ax1.axis('off')
+        #ax1.plot([xloc, xloc],[0,r],'k',linewidth=2)
+       #ax1.axis([0,c,0,r])
+        #ax1.set_aspect('equal', adjustable='box')
+        #plt.tight_layout()
+        #plt.show()
+
+        
+        #contours=np.arange(-3240,-2980,ci)#USE FOR CONSISTENT COLOR SCALE
+
+        #Final_Geomorphic_Surface=ax1.contourf(topo[:,:,ts-1],contours,cmap='viridis')
+        #ax1.contour(topo[:,:,ts-1],contours,colors='k',linestyles='solid',linewidth=0.1,alpha=0.4)
+
+        #ax1.axis([0,c,0,r])
+
+        #ax1.tick_params(bottom='off',top='off',left='off',right='off',labelbottom='off',labelleft='off')
+        #plt.tight_layout()
+
+
+        #fig = plt.figure(figsize=(10,10))
+        #gs = gridspec.GridSpec(1,1)
+        #ax2 = fig.add_subplot(gs[0,:])
+        #contours2=np.arange(np.min(strat[:,:,0]),np.max(strat[:,:,0])+ci,ci)
+        #ax2.contourf(strat[:,:,0],contours2,cmap='viridis')
+        #ax2.contour(strat[:,:,0],contours2,colors='k',linestyles='solid',linewidth=0.1,alpha=0.4)
+
+       # ax2.contourf(strat[:,:,0],100,cmap='viridis')
+        #ax2.contour(strat[:,:,0],100,colors='k',linestyles='solid',linewidth=0.1,alpha=0.4)
+        #ax2.axis('off')
+        #ax2.plot([xloc, xloc],[0,r],'k',linewidth=2)
+        #ax2.axis([0,c,0,r])
+        #ax2.set_aspect('equal', adjustable='box')
+        #ax2.set_title('basal erosional surface')
+        #ax2.tick_params(bottom='off',top='off',left='off',right='off',labelbottom='off',labelleft='off')
+        #plt.tight_layout()
+
+
+       # fig=plt.figure(figsize=(10,10))
+        #cbar=plt.colorbar(Final_Geomorphic_Surface)
+        #cbar.set_label('Elevation (m)')
+        #plt.tight_layout()
+
+        #print(np.max(topo[:,:,ts-1]))
+       # print(f'Max Final Geomorphic Depth is {np.max(strat[:,:,ts-1])}')
+       # print(f'Min Final Geomorphic Depth is {np.min(strat[:,:,ts-1])}')
+
+        #print(f'Min Basal Erosive Surface Depth is {np.min(strat[:,:,0])}')
+
+
+        #print(np.max(strat[:,:,ts-1]))
+        #print(np.min(strat[:,:,0]))
+
+        
+        #return fig
+
+    def Msb_EntireChannelBelt(self,xsec_start,xsec_end,w,h,Ztrajectory): #For meanderpy JoshuaChannel just Set if Ztrajectory is positive (aggradational) or net incisional (negative)
+
+        strat = self.strat
+        dx = self.dx
+
+        ##########
+        #CALCULATES STRATIGRAPHIC MOBILITY Number FOR WHOLE CHANNEL BELT
+        ##########
+
+        r,c,ts = np.shape(strat)
+
+        Xv = dx * np.arange(0,r)
+
+        CrossSecBeltAveragedStratMobility_OVERALL=[]
+        Belt_Aspect_Ratio_OVERALL=[]
+        BeltHeight_XSEC_debug=[]
+        BeltWidth_XSEC_debug=[]
+        Xmax_XSEC_debug=[]
+        Xmin_XSEC_debug=[]
+        Ymax_XSEC_debug=[]
+        Ymin_XSEC_debug=[]
+
+        Normalised_Belt_Heights=np.empty([xsec_end-xsec_start])
+        Normalised_Belt_Widths=np.empty([xsec_end-xsec_start])
+
+        for xloc in range(xsec_start,xsec_end):
+
+            Xdiff_XSEC=[]
+            Ydiff_XSEC=[]
+
+            for i in range(0,ts-1,3):
+                Y2=strat[:,xloc,i+2]
+                Y3=strat[:,xloc,i+3]
+
+                Ydiffindex=np.where(Y3!=Y2)
+
+                Xdiff=Xv[Ydiffindex]
+
+                Ydiff=Y2[Ydiffindex]
+
+                Xdiff_XSEC=np.append(Xdiff_XSEC,Xdiff)
+                Ydiff_XSEC=np.append(Ydiff_XSEC,Ydiff)
+
+
+            Xmax_XSEC=np.amax(Xdiff_XSEC)
+            Xmin_XSEC=np.amin(Xdiff_XSEC)
+            Ymax_XSEC=np.amax(Ydiff_XSEC)
+            Ymin_XSEC=np.amin(Ydiff_XSEC)
+
+            Xmax_XSEC_debug=np.append(Xmax_XSEC_debug,Xmax_XSEC)
+            Xmin_XSEC_debug=np.append(Xmin_XSEC_debug,Xmin_XSEC)
+            Ymax_XSEC_debug=np.append(Ymax_XSEC_debug,Ymax_XSEC)
+            Ymin_XSEC_debug=np.append(Ymin_XSEC_debug,Ymin_XSEC)
+
+            BeltWidth_XSEC=Xmax_XSEC-Xmin_XSEC
+
+            BeltWidth_XSEC_debug=np.append(BeltWidth_XSEC_debug,BeltWidth_XSEC)
+
+            #pdb.set_trace()
+
+            if Ztrajectory[-1]<0:  #Msb is negative if the trajectory is net incisional!
+
+                BeltHeight_XSEC=np.amax(strat[:,xloc,0])-Ymin_XSEC # BeltHeight is negative for incisional trajectories AND initial height of channel form is z[xloc] because its ON AN INITIAL SLOPE
+
+                CrossSecBeltAveragedStratMobility_XSEC=(((BeltWidth_XSEC-w)/(BeltHeight_XSEC-h))*(h/w))*-1
+
+                Belt_Aspect_Ratio_XSEC=(BeltWidth_XSEC/BeltHeight_XSEC)*-1 #Am going to say net incisional belts should have a negative symbol
+
+            else:
+                BeltHeight_XSEC=Ymax_XSEC-Ymin_XSEC
+
+                CrossSecBeltAveragedStratMobility_XSEC=((BeltWidth_XSEC-w)/(BeltHeight_XSEC-h))*(h/w)#
+
+                Belt_Aspect_Ratio_XSEC=BeltWidth_XSEC/BeltHeight_XSEC
+
+            BeltHeight_XSEC_debug=np.append(BeltHeight_XSEC_debug,BeltHeight_XSEC)
+
+            CrossSecBeltAveragedStratMobility_OVERALL=np.append(CrossSecBeltAveragedStratMobility_OVERALL,CrossSecBeltAveragedStratMobility_XSEC)
+
+            Belt_Aspect_Ratio_OVERALL=np.append(Belt_Aspect_Ratio_OVERALL,Belt_Aspect_Ratio_XSEC)
+
+        Normalised_Belt_Heights=BeltHeight_XSEC_debug/h
+        Normalised_Belt_Widths=BeltWidth_XSEC_debug/w
+
+        BeltWidth_MAXWEntireBelt=np.amax(Normalised_Belt_Widths)
+        BeltWidth_MAXWEntireBeltIndex=np.argmax(Normalised_Belt_Widths)+xsec_start
+
+        BeltWidth_MINEntireBelt=np.amin(Normalised_Belt_Widths)
+        BeltWidth_MINEntireBeltIndex=np.argmin(Normalised_Belt_Widths)+xsec_start
+
+        Msb_MAXEntireBelt=np.amax(CrossSecBeltAveragedStratMobility_OVERALL)
+        Msb_MAXEntireBelt_Index=np.argmax(CrossSecBeltAveragedStratMobility_OVERALL)+xsec_start
+
+        Msb_MINEntireBelt=np.amin(CrossSecBeltAveragedStratMobility_OVERALL)
+        Msb_MINEntireBelt_Index=np.argmin(CrossSecBeltAveragedStratMobility_OVERALL)+xsec_start
+
+        Msb_MEANEntireBelt =np.mean(CrossSecBeltAveragedStratMobility_OVERALL)
+
+        print(f'Maximum Msb value found is {Msb_MAXEntireBelt} at Xsec {Msb_MAXEntireBelt_Index}')
+        print(f'Minimum Msb value found is {Msb_MINEntireBelt} at Xsec {Msb_MINEntireBelt_Index}')
+        print(f"Mean Msb value of channel belt is {Msb_MEANEntireBelt}")
+
+        print(f"Maximum Bcb/B is {BeltWidth_MAXWEntireBelt:.1f} at XSEC {BeltWidth_MAXWEntireBeltIndex:.0f}")
+        print(f"Minimum Bcb/B is {BeltWidth_MINEntireBelt:.1f} at XSEC {BeltWidth_MINEntireBeltIndex:.0f}")
+
+        #print"Shape of Overall %s" % np.shape(CrossSecBeltAveragedStratMobility_OVERALL)
+
+        return Msb_MAXEntireBelt, Msb_MINEntireBelt, Msb_MEANEntireBelt, CrossSecBeltAveragedStratMobility_OVERALL ,Normalised_Belt_Heights ,Normalised_Belt_Widths, Belt_Aspect_Ratio_OVERALL
+
+    def Plot_Msb_ChannelBelt(self,Msb_MAXEntireBelt, Msb_MINEntireBelt, Msb_MEANEntireBelt, CrossSecBeltAveragedStratMobility_OVERALL,Normalised_Belt_Heights ,Normalised_Belt_Widths,Belt_Aspect_Ratio_OVERALL ):
+
+        #dx = self.dx
+        
+        blue_diamond=dict(markerfacecolor='b', marker='D')
+
+        plt.figure(figsize=(10,10))
+        plt.subplot(2, 1, 1)
+
+        #Distance_Downdip = np.arange(len(CrossSecBeltAveragedStratMobility_OVERALL)*dx)
+        #########PLOT MSb Figure##############
+        plt.plot(CrossSecBeltAveragedStratMobility_OVERALL,'b')
+        plt.xlabel('Cross Section Number',fontweight='bold',fontsize=24)
+        plt.ylabel('Msb',fontweight='bold',fontsize=24)
+        plt.xlabel("Aggradation (m)", fontsize=24, weight='bold') #hk number
+        plt.tick_params(labelsize=18)
+        plt.title('Msb Variation Through Channel Belt',fontweight='bold',fontsize=24)
+
+
+        plt.subplot(2, 1, 2)
+        plt.boxplot(CrossSecBeltAveragedStratMobility_OVERALL, vert=False,flierprops=blue_diamond)
+        plt.xlabel('Msb',fontweight='bold',fontsize=24)
+
+        #########PLOT Aspect Ratio Figure##############
+        plt.figure(figsize=(10,10))
+        plt.subplot(2, 1, 1)
+
+        plt.plot(Belt_Aspect_Ratio_OVERALL,'b')
+        plt.xlabel('Cross Section Number',fontweight='bold',fontsize=24)
+        plt.ylabel('Aspect Ratio',fontweight='bold',fontsize=24)
+        plt.tick_params(labelsize=18)
+        plt.title('Aspect Ratio Variation Through Channel Belt',fontweight='bold',fontsize=24)
+
+        plt.subplot(2, 1, 2)
+        plt.boxplot(Belt_Aspect_Ratio_OVERALL, vert=False,flierprops=blue_diamond)
+        plt.xlabel('Belt Aspect Ratio',fontweight='bold',fontsize=16)
+
+
+        ########################################
+        Normalised_Belt_Widths_index=np.argsort(Normalised_Belt_Widths)
+        Normalised_Belt_Widths=np.sort(Normalised_Belt_Widths)
+
+        Normalised_Belt_Heights=Normalised_Belt_Heights[Normalised_Belt_Widths_index]
+
+        #plt.figure()
+        #plt.scatter(Normalised_Belt_Widths,Normalised_Belt_Heights)
+        #plt.xlabel('Bcb/B (normalised channel belt width)',fontweight='bold',fontsize=16)
+        #plt.ylabel('Hcb/H (normalised channel belt thickness)',fontweight='bold',fontsize=16)
+        #plt.title('Normalised Channel Belt Variation within one channel belt',fontweight='bold',fontsize=18)
+        #plt.ylim(0,10)
+
+        plt.figure()
+        plt.boxplot(Normalised_Belt_Widths,vert=False)
+        plt.xlabel('Bcb/B',fontweight='bold',fontsize=16)
+        plt.title('Normalised Belt Width Variation Through Channel Belt',fontweight='bold',fontsize=18)
+        plt.show()
+
+    def Apparent_Trajectory_Plot(self,xlocs,LabelNames):
+
+        #Make Apparent Trajectory Plot
+        #xsec_start=1400
+        #xsec_end=1401
+        #Step=1
+
+        r,c,ts = np.shape(self.strat)
+        Xv = self.dx * np.arange(0,r)
+
+        ApparentLateralTrajectories=[]
+        ApparentAggradationTrajectories=[]
+
+        #xlocs=[1080,1380,1536,2600,3559,3800,4222] #JOSHUA CHANNEL
+
+        #LabelNames=['Bend1','Bend2','Bend3','Bend4','Bend5','Bend6','Bend7']
+        #for xloc in range(xsec_start,xsec_end,Step):
+        #pdb.set_trace()
+        for i in range(len(xlocs)):
+
+            xloc=xlocs[i]
+
+            Xdiff_XSEC=[]
+            Ydiff_XSEC=[]
+            Yplot_XSEC=[]
+            Xplot_XSEC=[]
+
+            #pdb.set_trace()
+            for k in range(0,ts-1,3):
+                Y2=self.strat[:,xloc,k+2]
+                Y3=self.strat[:,xloc,k+3]
+
+
+                #pdb.set_trace()
+
+                Ydiffindex=np.where(Y3!=Y2) #locates sandy thalwg blocks in cross section
+
+                Xdiff=Xv[Ydiffindex]   #x coordinares here represent y coordinates e.g. columns across the belt
+
+                Ydiff=Y2[Ydiffindex]  #y here represents z axis e.g. elevation
+
+                Yplot=np.min(Ydiff)  #movement of thalweg veertically centerline by centerline  (k for loop)
+
+                Xplot=Xdiff[np.argmin(Yplot)]  #movement of thalweg laterally centerline by centerline (k for loop)
+
+                Xdiff_XSEC=np.append(Xdiff_XSEC,Xdiff)
+                Ydiff_XSEC=np.append(Ydiff_XSEC,Ydiff)
+
+                Yplot_XSEC=np.append(Yplot_XSEC,Yplot)
+                Xplot_XSEC=np.append(Xplot_XSEC,Xplot)
+
+                #if Xplot_XSEC[0]>Xplot_XSEC[-1]:
+
+                #   Xplot_XSEC=Xplot_XSEC[::-1]
+
+                # Yplot_XSEC= Yplot_XSEC[::-1]
+
+
+                LateralMovement=Xplot_XSEC-np.min(Xplot_XSEC)
+                AggradationMovement=Yplot_XSEC-np.min(Yplot_XSEC)
+
+            if LateralMovement[0]>LateralMovement[-1]:   #This means that
+
+                LateralMovement=LateralMovement[::-1]
+
+            ApparentLateralTrajectories.append(LateralMovement)
+            ApparentAggradationTrajectories.append(AggradationMovement)
+
+            #ApparentLateralTrajectories=np.append(ApparentLateralTrajectories, LateralMovement, axis=1)
+            #ApparentAggradationTrajectories=np.append(ApparentAggradationTrajectories, AggradationMovement,axis=1)
+
+
+        fig = plt.subplots(figsize=(10,10))
+
+        ax = plt.axes(xlim=(0,7000),ylim=(-100,600))
+        ax.set_prop_cycle('color',['red', 'yellow','green','cyan','black','blue','magenta','grey','orange'])
+
+        for i in range(0,len(ApparentLateralTrajectories)):
+            ax.plot(ApparentLateralTrajectories[i],ApparentAggradationTrajectories[i], label=LabelNames[i])
+
+        ax.set_xlabel("Lateral Distance (m)", fontsize=24, weight='bold')
+        ax.set_ylabel("Aggradation Distance  (m)", fontsize=24, weight='bold')
+        ax.tick_params(labelsize=18)
+        ax.legend(loc='best', fontsize=18)
+
+        return ApparentLateralTrajectories, ApparentAggradationTrajectories,LabelNames
+
+class ChannelBelt:
+    """class for ChannelBelt objects"""
+    def __init__(self, channels, cutoffs, cl_times, cutoff_times, MTDs, MTD_times):
+        """initialize ChannelBelt object
+        channels - list of Channel objects
+        cutoffs - list of Cutoff objects
+        cl_times - list of ages of Channel objects
+        cutoff_times - list of ages of Cutoff objects
+        ###
+        MTDs - list of MTD objects"""
+        self.channels = channels
+        self.cutoffs = cutoffs
+        self.cl_times = cl_times
+        self.cutoff_times = cutoff_times
+        ###
+        self.MTDs=MTDs
+        self.MTD_times = MTD_times
+
+
+    def migrate(self,nit,saved_ts,deltas,pad,crdist,Cf,kl,kv,dt,dens,t1,t2,t3,aggr_factor,*D):
+        """function for computing migration rates along channel centerlines and moving the centerlines accordingly
+        inputs:
+        nit - number of iterations
+        saved_ts - which time steps will be saved
+        deltas - distance between nodes on centerline
+        pad - padding (number of nodepoints along centerline)
+        crdist - threshold distance at which cutoffs occur
+        Cf - dimensionless Chezy friction factor
+        kl - migration rate constant (m/s)
+        kv - vertical slope-dependent erosion rate constant (m/s)
+        dt - time step (s)
+        dens - density of fluid (kg/m3)
+        t1 - time step when incision starts
+        t2 - time step when lateral migration starts
+        t3 - time step when aggradation starts
+        aggr_factor - aggradation factor
+        D - channel depth (m)"""
+        channel = self.channels[-1] # first channel is the same as last channel of input
+        x = channel.x; y = channel.y; z = channel.z
+        W = channel.W;
+        if len(D)==0:
+            D = channel.D
+        else:
+            D = D[0]
+        k = 1.0 # constant in HK equation
+        xc = [] # initialize cutoff coordinates
+        # determine age of last channel:
+        if len(self.cl_times)>0:
+            last_cl_time = self.cl_times[-1]
+        else:
+            last_cl_time = 0
+        dx, dy, dz, ds, s = compute_derivatives(x,y,z)
+        slope = np.gradient(z)/ds
+        # padding at the beginning can be shorter than padding at the downstream end:
+        pad1 = int(pad/10.0)
+        if pad1<5:
+            pad1 = 5
+        omega = -1.0 # constant in curvature calculation (Howard and Knutson, 1984)
+        gamma = 2.5 # from Ikeda et al., 1981 and Howard and Knutson, 1984
+        for itn in range(nit): # main loop
+            update_progress(itn/nit)
+
+            x, y = migrate_one_step(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma)
+            # x, y = migrate_one_step_w_bias(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma)
+            x,y,z,xc,yc,zc = cut_off_cutoffs(x,y,z,s,crdist,deltas) # find and execute cutoffs
+            x,y,z,dx,dy,dz,ds,s = resample_centerline(x,y,z,deltas) # resample centerline
+            slope = np.gradient(z)/ds
+            # for itn<t1, z is unchanged
+            if (itn>t1) & (itn<=t2): # incision
+                if np.min(np.abs(slope))!=0: # if slope is not zero
+                    z = z + kv*dens*9.81*D*slope*dt
+                else:
+                    z = z - kv*dens*9.81*D*dt*0.05 # if slope is zero
+            if (itn>t2) & (itn<=t3): # lateral migration
+                if np.min(np.abs(slope))!=0: # if slope is not zero
+                    z = z + kv*dens*9.81*D*slope*dt - kv*dens*9.81*D*np.median(slope)*dt
+                else:
+                    z = z # no change in z
+            if (itn>t3): # aggradation
+                if np.min(np.abs(slope))!=0: # if slope is not zero
+                    z = z + kv*dens*9.81*D*slope*dt - aggr_factor*kv*dens*9.81*D*np.mean(slope)*dt
+                else:
+                    z = z + aggr_factor*dt
+            if len(xc)>0: # save cutoff data
+                self.cutoff_times.append(last_cl_time+(itn+1)*dt/(365*24*60*60.0))
+                cutoff = Cutoff(xc,yc,zc,W,D) # create cutoff object
+                self.cutoffs.append(cutoff)
+            # saving centerlines:
+            if np.mod(itn,saved_ts)==0:
+                self.cl_times.append(last_cl_time+(itn+1)*dt/(365*24*60*60.0))
+                channel = Channel(x,y,z,W,D) # create channel object
+                self.channels.append(channel)
+
+    def Create_Channel_Belt_From_External_Source(self,X,Y,Z,W,D): #,cutoff_times):
+
+        for i in range(1,len(X)): # index 0 is used to initialize first channel object in jupyter
+            #pdb.set_trace()
+           # if i in cutoff_times:
+
+            #    x=X[i]
+             #   y=Y[i]
+              #  z=Z[i]
+
+               # cutoff = Cutoff(x,y,z,W,D)
+
+                #self.cutoffs.append(cutoff)
+                #self.cutoff_times.append(i)
+
+            #else:    
+            x=X[i]
+            y=Y[i]
+            z=Z[i]
+            channel=Channel(x,y,z,W,D)
+
+            self.channels.append(channel)
+            self.cl_times.append(i)
+
+    def migrate_PM_RANDOM(self,nit,saved_ts,deltas,pad,crdist,Cf,kl,kv,dt,dens,dz_trajectory,no_agg,low_agg,med_agg,high_agg,*D):
+        """function for computing migration rates along channel centerlines and moving the centerlines accordingly
+        inputs:
+        nit - number of iterations
+        saved_ts - which time steps will be saved
+        deltas - distance between nodes on centerline
+        pad - padding (number of nodepoints along centerline)
+        crdist - threshold distance at which cutoffs occur
+        Cf - dimensionless Chezy friction factor
+        kl - migration rate constant (m/s)
+        kv - vertical slope-dependent erosion rate constant (m/s)
+        dt - time step (s)
+        dens - density of fluid (kg/m3)
+        D - channel depth (m)"""
+
+        channel = self.channels[-1] # first channel is the same as last channel of input
+        x = channel.x; y = channel.y; z = channel.z
+        W = channel.W;
+        if len(D)==0:
+            D = channel.D
+        else:
+            D = D[0]
+        k = 1.0 # constant in HK equation
+        xc = [] # initialize cutoff coordinates
+        # determine age of last channel:
+        if len(self.cl_times)>0:
+            last_cl_time = self.cl_times[-1]
+        else:
+            last_cl_time = 0
+        dx, dy, dz, ds, s = compute_derivatives(x,y,z)
+        slope = np.gradient(z)/ds
+        # padding at the beginning can be shorter than padding at the downstream end:
+        pad1 = int(pad/10.0)
+        if pad1<5:
+            pad1 = 5
+        omega = -1.0 # constant in curvature calculation (Howard and Knutson, 1984)
+        gamma = 2.5 # from Ikeda et al., 1981 and Howard and Knutson, 1984
+        target_sinuosity=np.random.uniform(1.2,1.8)
+        Sl=0.000
+        #pdb.set_trace()
+        for itn in range(nit): # main loop
+            #pdb.set_trace()
+            if len(self.channels)>=high_agg:
+            #if len(self.channels)>=med_agg: #I hard coded this in just for making the ALPAK model specifically for paper 3 - DONT USE OTHERWISE
+
+                   break #once you have 8 channels stacked flat try to aggrade entire system - disorganzied stacking
+
+            #update_progress(itn/nit)
+
+            #if (np.mod(itn,saved_ts)==0 and np.random.uniform(0,1)>1.5 and itn>2880): #What to do For the occassional MTD - no MTD's during incision phase for now... but could have throughout
+
+                #pdb.set_trace()
+
+                #crdist=4.0*W #If MTD then put aggressive cutoff threshold in to simulate channel straightening as a result of MTD. 
+
+               # x, y = migrate_one_step(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma)
+                # x, y = migrate_one_step_w_bias(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma)
+              #  x,y,z,xc,yc,zc = cut_off_cutoffs(x,y,z,s,crdist,deltas) # find and execute cutoffs
+               # x,y,z,dx,dy,dz,ds,s = resample_centerline(x,y,z,deltas) # resample centerline
+               # slope = np.gradient(z)/ds
+                # for itn<t1, z is unchanged
+               # z=z+dz_trajectory[itn-1]
+               # if len(xc)>0: # save cutoff data
+                #    self.cutoff_times.append(last_cl_time+(itn+1)*dt/(365*24*60*60.0))
+                #    cutoff = Cutoff(xc,yc,zc,W,D) # create cutoff object
+                #    self.cutoffs.append(cutoff)
+                
+               # self.MTD_times.append(last_cl_time+(itn+1)*dt/(365*24*60*60.0))
+
+               # self.cl_times.append(last_cl_time+(itn+1)*dt/(365*24*60*60.0))
+               # channel = Channel(x,y,z,W,D) # create channel object
+               # self.channels.append(channel)
+
+            elif len(self.channels)>=med_agg: #+1 because len counts 0th element as 1 - *shrug*
+
+                #THIS HARD CODING ALIGNS MCHARGUE ORGANIZED BEHAVIOUR TO YOUR PAPER 1 MODELS
+                #crdist=2.5*W
+                #saved_ts=40
+                #dt=1*365*24*60*60.0
+                #kl=1.6/(365*24*60*60.0)
+                x, y = migrate_one_step(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma)
+                # x, y = migrate_one_step_w_bias(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma)
+                x,y,z,xc,yc,zc = cut_off_cutoffs(x,y,z,s,crdist,deltas) # find and execute cutoffs
+                x,y,z,dx,dy,dz,ds,s = resample_centerline(x,y,z,deltas) # resample centerline
+                slope = np.gradient(z)/ds
+                 
+                deltaz = Sl * deltas*(len(x)-1)
+                z = np.linspace(0,deltaz,len(x))[::-1]
+                #z=z+(8*(len(self.channels)-med_agg))+(4*(med_agg-low_agg))+(2*(low_agg-no_agg)) #original alpak
+                
+
+
+                if np.mod(itn,saved_ts)==0:
+                    self.cl_times.append(last_cl_time+(itn+1)*dt/(365*24*60*60.0))
+                    channel = Channel(x,y,z,W,D) # create channel object
+                    self.channels.append(channel)
+
+                
+            else: 
+        
+
+                x, y = migrate_one_step(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma)
+                # x, y = migrate_one_step_w_bias(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma)
+                x,y,z,xc,yc,zc = cut_off_cutoffs(x,y,z,s,crdist,deltas) # find and execute cutoffs
+                x,y,z,dx,dy,dz,ds,s = resample_centerline(x,y,z,deltas) # resample centerline
+                sinuosity = s[-1]/(x[-1]-x[0])
+                #slope = np.gradient(z)/ds
+                Sl=0.000
+                # for itn<t1, z is unchanged
+                
+                #if len(xc)>0: # save cutoff data
+                 #   self.cutoff_times.append(last_cl_time+(itn+1)*dt/(365*24*60*60.0))
+                  #  cutoff = Cutoff(xc,yc,zc,W,D) # create cutoff object
+                   # self.cutoffs.append(cutoff)
+                # saving centerlines:
+                #if np.mod(itn,saved_ts)==0:
+
+                 #   self.cl_times.append(last_cl_time+(itn+1)*dt/(365*24*60*60.0))
+                  #  channel = Channel(x,y,z,W,D) # create channel object
+                   # self.channels.append(channel)
+
+                #if sinuosity>1.1 and np.random.uniform(0,1)>0.991 or sinuosity>1.7:
+
+                if abs(sinuosity-target_sinuosity)<0.01:
+
+                    if len(self.channels)>=low_agg: #start low  aggrading after first disorganized channels
+                        deltaz = Sl * deltas*(len(x)-1)
+                        z = np.linspace(0,deltaz,len(x))[::-1]
+                        #z=z+(4*(len(self.channels)-low_agg))+(2*(low_agg-no_agg)) #aggrade 
+                        z=z+(9*(len(self.channels)-low_agg)) #+(2*(low_agg-no_agg)) #aggrade 
+
+                    elif len(self.channels)>=no_agg: #start low  aggrading after first disorganized channels
+                        deltaz = Sl * deltas*(len(x)-1)
+                        z = np.linspace(0,deltaz,len(x))[::-1]
+                        #z=z+(2*(len(self.channels)-no_agg)) #aggrade the next channel by 5m #TBIS IS AN INTEGER SHOULDNT BE! 
+                        z=z+(9*(len(self.channels)-no_agg))# +(4*(med_agg-low_agg))+(2*(low_agg-no_agg))
+
+                    
+                        #x,y,z,dx,dy,dz,ds,s = resample_centerline(x,y,z,deltas) # resample centerline
+                    self.cl_times.append(last_cl_time+(itn)*dt/(365*24*60*60.0))
+                    channel = Channel(x,y,z,W,D) # create channel object
+                    self.channels.append(channel)
+                    #pdb.set_trace()
+                    
+                    n_bends=np.random.uniform(20,35) #next bend has somewhere between 10 and 25 bends
+                    print(sinuosity)
+                    if len(self.channels)<med_agg:
+                        x,y,z=reset_channel(W,D,Sl,deltas,pad,n_bends)
+                        target_sinuosity=np.random.uniform(1.2,1.8)
+                    
+                    #pdb.set_trace()
+        #pdb.set_trace()     
+        #chb=ChannelBelt(channels, cutoffs, cl_times, cutoff_times, MTDs, MTD_times)
+        #chb=ChannelBelt
+
+    def plot(self, plot_type, pb_age, ob_age, end_time, n_channels):
+        """plot ChannelBelt object
+        plot_type - can be either 'strat' (for stratigraphic plot) or 'morph' (for morphologic plot)
+        pb_age - age of point bars (in years) at which they get covered by vegetation
+        ob_age - age of oxbow lakes (in years) at which they get covered by vegetation
+        end_time (optional) - age of last channel to be plotted (in years)"""
+        cot = np.array(self.cutoff_times)
+        sclt = np.array(self.cl_times)
+        if end_time>0:
+            cot = cot[cot<=end_time]
+            sclt = sclt[sclt<=end_time]
+        times = np.sort(np.hstack((cot,sclt)))
+        times = np.unique(times)
+        order = 0 # variable for ordering objects in plot
+        # set up min and max x and y coordinates of the plot:
+        xmin = np.min(self.channels[0].x)
+        xmax = np.max(self.channels[0].x)
+        ymax = 0
+        for i in range(len(self.channels)):
+            ymax = max(ymax, np.max(np.abs(self.channels[i].y)))
+        ymax = ymax+2*self.channels[0].W # add a bit of space on top and bottom
+        ymin = -1*ymax
+        # size figure so that its size matches the size of the model:
+        fig = plt.figure(figsize=(20,(ymax-ymin)*20/(xmax-xmin)))
+        if plot_type == 'morph':
+            pb_crit = len(times[times<times[-1]-pb_age])/float(len(times))
+            ob_crit = len(times[times<times[-1]-ob_age])/float(len(times))
+            green = (106/255.0,159/255.0,67/255.0) # vegetation color
+            pb_color = (189/255.0,153/255.0,148/255.0) # point bar color
+            ob_color = (15/255.0,58/255.0,65/255.0) # oxbow color
+            pb_cmap = make_colormap([green,green,pb_crit,green,pb_color,1.0,pb_color]) # colormap for point bars
+            ob_cmap = make_colormap([green,green,ob_crit,green,ob_color,1.0,ob_color]) # colormap for oxbows
+            plt.fill([xmin,xmax,xmax,xmin],[ymin,ymin,ymax,ymax],color=(106/255.0,159/255.0,67/255.0))
+        if plot_type == 'age':
+            age_cmap = cm.get_cmap('magma',n_channels)
+        for i in range(0,len(times)):
+            if times[i] in sclt:
+                ind = np.where(sclt==times[i])[0][0]
+                x1 = self.channels[ind].x
+                y1 = self.channels[ind].y
+                W = self.channels[ind].W
+                xm, ym = get_channel_banks(x1,y1,W)
+                if plot_type == 'morph':
+                    if times[i]>times[-1]-pb_age:
+                        plt.fill(xm,ym,facecolor=pb_cmap(i/float(len(times)-1)),edgecolor='k',linewidth=0.2)
+                    else:
+                        plt.fill(xm,ym,facecolor=pb_cmap(i/float(len(times)-1)))
+                if plot_type == 'strat':
+                    order += 1
+                    plt.fill(xm,ym,sns.xkcd_rgb["light tan"],edgecolor='k',linewidth=0.25,zorder=order)
+                if plot_type == 'age':
+                    order += 1
+                    plt.fill(xm,ym,facecolor=age_cmap(i/float(n_channels-1)),edgecolor='k',linewidth=0.1,zorder=order)
+            if times[i] in cot:
+                ind = np.where(cot==times[i])[0][0]
+                for j in range(0,len(self.cutoffs[ind].x)):
+                    x1 = self.cutoffs[ind].x[j]
+                    y1 = self.cutoffs[ind].y[j]
+                    xm, ym = get_channel_banks(x1,y1,self.cutoffs[ind].W)
+                    if plot_type == 'morph':
+                        plt.fill(xm,ym,color=ob_cmap(i/float(len(times)-1)))
+                    if plot_type == 'strat':
+                        order = order+1
+                        plt.fill(xm,ym,sns.xkcd_rgb["ocean blue"],edgecolor='k',linewidth=0.25,zorder=order)
+                    if plot_type == 'age':
+                        order += 1
+                        plt.fill(xm,ym,sns.xkcd_rgb["sea blue"],edgecolor='k',linewidth=0.1,zorder=order)
+        x1 = self.channels[len(sclt)-1].x
+        y1 = self.channels[len(sclt)-1].y
+        xm, ym = get_channel_banks(x1,y1,self.channels[len(sclt)-1].W)
+        order = order+1
+        if plot_type == 'age':
+            plt.fill(xm,ym,color=sns.xkcd_rgb["sea blue"],zorder=order,edgecolor='k',linewidth=0.1)
+        else:
+            plt.fill(xm,ym,color=(16/255.0,73/255.0,90/255.0),zorder=order) #,edgecolor='k')
+        plt.axis('equal')
+        plt.xlim(xmin,xmax)
+        plt.ylim(ymin,ymax)
+        
+
+        return fig
+
+    def create_movie(self, xmin, xmax, plot_type, filename, dirname, pb_age, ob_age, scale, end_time, n_channels):
+        """method for creating movie frames (PNG files) that capture the plan-view evolution of a channel belt through time
+        movie has to be assembled from the PNG file after this method is applied
+        xmin - value of x coodinate on the left side of frame
+        xmax - value of x coordinate on right side of frame
+        plot_type = - can be either 'strat' (for stratigraphic plot) or 'morph' (for morphologic plot)
+        filename - first few characters of the output filenames
+        dirname - name of directory where output files should be written
+        pb_age - age of point bars (in years) at which they get covered by vegetation (if the 'morph' option is used for 'plot_type')
+        ob_age - age of oxbow lakes (in years) at which they get covered by vegetation (if the 'morph' option is used for 'plot_type')
+        scale - scaling factor (e.g., 2) that determines how many times larger you want the frame to be, compared to the default scaling of the figure
+        end_time - time at which simulation should be stopped
+        n_channels - total number of channels + cutoffs for which simulation is run (usually it is len(chb.cutoffs) + len(chb.channels)). Used when plot_type = 'age'
+        """
+        sclt = np.array(self.cl_times)
+        if len(end_time)>0:
+            sclt = sclt[sclt<=end_time]
+        channels = self.channels[:len(sclt)]
+        ymax = 0
+        for i in range(len(channels)):
+            ymax = max(ymax, np.max(np.abs(channels[i].y)))
+        ymax = ymax+2*channels[0].W # add a bit of space on top and bottom
+        ymin = -1*ymax
+        for i in range(0,len(sclt)):
+            fig = self.plot(plot_type, pb_age, ob_age, sclt[i], n_channels)
+            fig_height = scale*fig.get_figheight()
+            fig_width = (xmax-xmin)*fig_height/(ymax-ymin)
+            fig.set_figwidth(fig_width)
+            fig.set_figheight(fig_height)
+            fig.gca().set_xlim(xmin,xmax)
+            fig.gca().set_xticks([])
+            fig.gca().set_yticks([])
+            plt.plot([xmin+200, xmin+200+5000],[ymin+200, ymin+200], 'k', linewidth=2)
+            plt.text(xmin+200+2000, ymin+200+100, '5 km', fontsize=14)
+            fname = dirname+filename+'%03d.png'%(i)
+            fig.savefig(fname, bbox_inches='tight')
+            plt.close()
+
+    def build_3d_model_PM_MTD(self,model_type,h_mud,levee_width,h,w,bth,dcr,dx,delta_s,starttime,endtime,xmin,xmax,ymin,ymax,CLZjump,TurbidityCurrentHeight):
+        """method for building 3D model from set of centerlines (that are part of a ChannelBelt object)
+        Inputs:
+        model_type - model type ('fluvial' or 'submarine')
+        h_mud - maximum thickness of overbank mud
+        levee_width - width of overbank mud
+        h - channel depth
+        w - channel width
+        bth - thickness of channel sand (only used in submarine models)
+        dcr - critical channel depth where sand thickness goes to zero (only used in submarine models)
+        dx - cell size in x and y directions
+        delta_s - sampling distance alogn centerlines
+        starttime - age of centerline that will be used as the first centerline in the model
+        endtime - age of centerline that will be used as the last centerline in the model
+        xmin,xmax,ymin,ymax - x and y coordinates that define the model domain; if xmin is set to zero,
+        a plot of the centerlines is generated and the model domain has to be defined by clicking its upper
+        left and lower right corners
+        Returns: a ChannelBelt3D object
+        """
+        #pdb.set_trace()
+        sclt = np.array(self.cl_times)
+        #ind1 = np.where(sclt>=starttime)[0][0]
+        ind1 = 1 #Remove initial centerline as its straight PAUL CHANGE 
+        ind2 = np.where(sclt<=endtime)[0][-1]
+        sclt = sclt[ind1:ind2+1]
+        #pdb.set_trace()
+        channels = self.channels[ind1:ind2+1]
+        MTDs=self.MTDs[ind1:ind2+1]
+        MTD_times=np.array(self.MTD_times)
+        #sinuosity=channels.sinuosity
+        cot = np.array(self.cutoff_times)
+        if (len(cot)>0) & (len(np.where(cot>=starttime)[0])>0) & (len(np.where(cot<=endtime)[0])>0): #If cutoff has occured...
+            cfind1 = np.where(cot>=starttime)[0][0]
+            cfind2 = np.where(cot<=endtime)[0][-1]
+            cot = cot[cfind1:cfind2+1]
+            cutoffs = self.cutoffs[cfind1:cfind2+1]
+        else:
+            cot = []
+            cutoffs = []
+        #pdb.set_trace()
+        n_steps = len(sclt) #CENTERLINES AND MTDS COMBINED
+         # number of events
+
+        #MTD_Event=np.argwhere(sclt==MTD_times) #Return Argument where MTD event occurs
+
+        if xmin == 0: # plot centerlines and define model domain
+            plt.figure(figsize=(15,4))
+            maxX, minY, maxY = 0, 0, 0
+            for i in range(n_steps): # plot centerlines
+                #Need to plot MTD centerline?
+                plt.plot(channels[i].x,channels[i].y,'k')
+                maxX = max(maxX,np.max(channels[i].x))
+                maxY = max(maxY,np.max(channels[i].y))
+                minY = min(minY,np.min(channels[i].y))
+            plt.axis([0,maxX,minY-10*w,maxY+10*w])
+            plt.gca().set_aspect('equal', adjustable='box')
+            plt.tight_layout()
+            pts = np.zeros((2,2))
+            for i in range(0,2):
+                pt = np.asarray(plt.ginput(1))
+                pts[i,:] = pt
+                plt.scatter(pt[0][0],pt[0][1])
+            plt.plot([pts[0,0],pts[1,0],pts[1,0],pts[0,0],pts[0,0]],[pts[0,1],pts[0,1],pts[1,1],pts[1,1],pts[0,1]],'r')
+            xmin = min(pts[0,0],pts[1,0])
+            xmax = max(pts[0,0],pts[1,0])
+            ymin = min(pts[0,1],pts[1,1])
+            ymax = max(pts[0,1],pts[1,1])
+        iwidth = int((xmax-xmin)/dx)
+        iheight = int((ymax-ymin)/dx)
+        topo = np.zeros((iheight,iwidth,4*n_steps)) # array for storing topographic surfaces
+
+        dists = np.zeros((iheight,iwidth,n_steps))
+        zmaps = np.zeros((iheight,iwidth,n_steps))
+
+        facies = np.zeros((4*n_steps,1))
+        # create initial topography:
+        x1 = np.linspace(0,iwidth-1,iwidth)
+        y1 = np.linspace(0,iheight-1,iheight)
+        xv, yv = np.meshgrid(x1,y1)
+        z1 = channels[0].z
+        z1 = z1[(channels[0].x>xmin) & (channels[0].x<xmax)]
+        topoinit = z1[0] - ((z1[0]-z1[-1])/(xmax-xmin))*xv*dx # initial (sloped) topography
+        topo[:,:,0] = topoinit.copy()
+        surf = topoinit.copy()
+        facies[0] = np.NaN
+        # generate surfaces:
+        channels3D = []
+
+        indices = np.where(np.in1d(sclt, MTD_times))[0] # Which indices in SCLT correspond to MTD_times
+        #pdb.set_trace()
+        for i in range(n_steps):
+            update_progress(i/n_steps)
+            x = channels[i].x
+            y = channels[i].y
+            z = channels[i].z
+            cutoff_ind = []
+            # check if there were cutoffs during the last time step and collect indices in an array:
+            for j in range(len(cot)):
+                #pdb.set_trace()
+                if (cot[j] >= sclt[i-1]) & (cot[j] < sclt[i]):
+                    cutoff_ind = np.append(cutoff_ind,j)
+            # create distance map: PM ADDED XINDS AND YINDS OUTPUT
+            #pdb.set_trace()
+            cl_dist, x_pix, y_pix, z_pix, s_pix, z_map, x1, y1, z1, xinds, yinds = dist_map(x,y,z,xmin,xmax,ymin,ymax,dx,delta_s)
+            if i == 0:
+                cl_dist_prev = cl_dist
+
+            ##############################MTD############################################
+            if i in indices: #This checks whether the centerline is an MTD one!
+                #pdb.set_trace()
+
+                w_mtd=w*1
+
+                h_mtd=h*1
+
+                
+                ######################EROSION
+                surf = np.minimum(surf,erosion_surface(h_mtd,w_mtd/dx,cl_dist,z_map))
+                topo[:,:,4*i] = surf # erosional surface
+                dists[:,:,i] = cl_dist
+                zmaps[:,:,i] = z_map
+                facies[4*i] = np.NaN
+
+                ######################MUD
+                CL_Start_Index=self.cl_times.index(starttime) #Finds the centerline NUMBER (not its "age")
+                #pdb.set_trace()
+                if CLZjump[CL_Start_Index+i]<0:
+                    h_mud=0.5
+
+                elif CLZjump[CL_Start_Index+i]==0:
+                    h_mud=2
+
+                elif CLZjump[CL_Start_Index+i]>0:
+                    #h_mud=math.ceil(CLZjump[CL_Start_Index+i]+bth)
+                    h_mud=14
+
+                height_mud_map=Levee_Height_Control(surf,x_pix,y_pix,z_pix,TurbidityCurrentHeight,xinds,yinds)
+
+                mud_surf=mud_surface(h_mud,levee_width/dx,cl_dist,w_mtd/dx)
+
+                height_corrected_mud_surf=np.multiply(height_mud_map,mud_surf)
+
+                surf= surf + height_corrected_mud_surf # mud/levee deposition
+
+                topo[:,:,4*i+1] = surf # top of levee
+                facies[4*i+1] = 2
+
+                   # sand (MTD) thickness:
+
+                bth_mtd=0.25*h
+                th, relief = sand_surface(surf,bth_mtd,dcr,z_map,h_mtd)
+                th[th<0] = 0 # eliminate negative th values
+                th[cl_dist>1.0*w_mtd/dx] = 0 # eliminate sand outside of channel
+                th_oxbows = th.copy()
+                # setting sand thickness to zero at cutoff locations:
+                if len(cutoff_ind)>0:
+                    #pdb.set_trace()
+                    cutoff_dists = 1e10*np.ones(np.shape(th)) #initialize cutoff_dists with a large number
+                    for j in range(len(cutoff_ind)):
+                        cutoff_dist, cfx_pix, cfy_pix = cl_dist_map(cutoffs[int(cutoff_ind[j])].x[0],cutoffs[int(cutoff_ind[j])].y[0],cutoffs[int(cutoff_ind[j])].z[0],xmin,xmax,ymin,ymax,dx)
+                        cutoff_dists = np.minimum(cutoff_dists,cutoff_dist)
+                    th_oxbows[cutoff_dists>=0.9*w_mtd/dx] = 0 # set oxbow fill thickness to zero outside of oxbows
+                    th[cutoff_dists<0.9*w_mtd/dx] = 0 # set point bar thickness to zero inside of oxbows
+                    # adding back sand near the channel axis (submarine only):
+                    # th[cl_dist<0.5*w/dx] = bth*(1 - relief[cl_dist<0.5*w/dx]/dcr)
+                else: # no cutoffs
+                    th_oxbows = np.zeros(np.shape(th))
+                surf = surf+th_oxbows # update topographic surface with oxbow deposit thickness
+                topo[:,:,4*i+2] = surf # top of oxbow mud
+                facies[4*i+2] = 0
+                
+                surf = surf+th # update topographic surface with sand thickness
+                topo[:,:,4*i+3] = surf # top of sand
+                facies[4*i+3] = 3 #Facies = MTD
+
+                channels3D.append(Channel(x1-xmin,y1-ymin,z1,w_mtd,h_mtd))
+
+            else:
+            #############################################################################
+
+                # erosion:
+                surf = np.minimum(surf,erosion_surface(h,w/dx,cl_dist,z_map))
+                topo[:,:,4*i] = surf # erosional surface
+                dists[:,:,i] = cl_dist
+                zmaps[:,:,i] = z_map
+                facies[4*i] = np.NaN
+
+
+                if model_type == 'fluvial':
+                    pb = point_bar_surface(cl_dist,z_map,h,w/dx)
+                    th = np.maximum(surf,pb)-surf
+                    th_oxbows = th.copy()
+                    # setting sand thickness to zero at cutoff locations:
+                    if len(cutoff_ind)>0:
+                        #pdb.set_trace()
+                        cutoff_dists = 1e10*np.ones(np.shape(th)) #initialize cutoff_dists with a large number
+                        for j in range(len(cutoff_ind)):
+                            cutoff_dist, cfx_pix, cfy_pix = cl_dist_map(cutoffs[int(cutoff_ind[j])].x[0],cutoffs[int(cutoff_ind[j])].y[0],cutoffs[int(cutoff_ind[j])].z[0],xmin,xmax,ymin,ymax,dx)
+                            cutoff_dists = np.minimum(cutoff_dists,cutoff_dist)
+                        th_oxbows[cutoff_dists>=0.9*w/dx] = 0 # set oxbow fill thickness to zero outside of oxbows
+                        th[cutoff_dists<0.9*w/dx] = 0 # set point bar thickness to zero inside of oxbows
+                    else: # no cutoffs
+                        th_oxbows = np.zeros(np.shape(th))
+                    th[th<0] = 0 # eliminate negative th values
+                    surf = surf+th_oxbows # update topographic surface with oxbow deposit thickness
+                    topo[:,:,4*i+1] = surf # top of oxbow mud
+                    facies[4*i+1] = 0
+                    surf = surf+th # update topographic surface with sand thickness
+                    topo[:,:,4*i+2] = surf # top of sand
+                    facies[4*i+2] = 1
+                    surf = surf + mud_surface(h_mud,levee_width/dx,cl_dist,w/dx,z_map,surf) # mud/levee deposition
+                    topo[:,:,4*i+3] = surf # top of levee
+                    facies[4*i+3] = 2
+                    channels3D.append(Channel(x1-xmin,y1-ymin,z1,w,h))
+
+                if model_type == 'submarine':
+                    #DEFINE MUD THICKNESS AND DEPOSIT MUD OVER MODEL
+
+                    CL_Start_Index=self.cl_times.index(starttime) #Finds the centerline NUMBER (not its "age")
+                    #pdb.set_trace()
+
+                    ####MUD DEPOSITION###########
+                    if CLZjump[CL_Start_Index+i]<0:
+                        h_mud=0.5
+                #levee_width=2000
+
+                    elif CLZjump[CL_Start_Index+i]==0:
+                        h_mud=10
+                #levee_width=2000
+
+                    #elif CLZjump[]
+
+                    elif CLZjump[CL_Start_Index+i]>0:
+                        #pdb.set_trace()
+                        #h_mud=math.ceil(CLZjump[CL_Start_Index+i]*1.4)
+
+                        h_mud=CLZjump[CL_Start_Index+i]+bth
+                    
+                    #pdb.set_trace()
+                    height_mud_map=Levee_Height_Control(surf,x_pix,y_pix,z_pix,TurbidityCurrentHeight,xinds,yinds)
+
+                    #mud_surf=mud_surface(h_mud,levee_width/dx,cl_dist,w/dx,z_map,surf) #conventional mud sepsoition
+                    mud_surf=mud_surface(h_mud,levee_width/dx,cl_dist,w/dx)
+
+                    height_corrected_mud_surf=np.multiply(height_mud_map,mud_surf)
+
+                    #surf=surf+mud_surf
+                    surf= surf + height_corrected_mud_surf # mud/levee deposition
+
+                    topo[:,:,4*i+1] = surf # top of levee
+                    facies[4*i+1] = 2
+
+
+                    # sand thickness:
+                    th, relief = sand_surface(surf,bth,dcr,z_map,h)
+                    th[th<0] = 0 # eliminate negative th values
+                    th[cl_dist>1.0*w/dx] = 0 # eliminate sand outside of channel
+                    th_oxbows = th.copy()
+                    # setting sand thickness to zero at cutoff locations:
+                    if len(cutoff_ind)>0:
+                        #pdb.set_trace()
+                        cutoff_dists = 1e10*np.ones(np.shape(th)) #initialize cutoff_dists with a large number
+                        for j in range(len(cutoff_ind)):
+                            cutoff_dist, cfx_pix, cfy_pix = cl_dist_map(cutoffs[int(cutoff_ind[j])].x[0],cutoffs[int(cutoff_ind[j])].y[0],cutoffs[int(cutoff_ind[j])].z[0],xmin,xmax,ymin,ymax,dx)
+                            cutoff_dists = np.minimum(cutoff_dists,cutoff_dist)
+                        th_oxbows[cutoff_dists>=0.9*w/dx] = 0 # set oxbow fill thickness to zero outside of oxbows
+                        th[cutoff_dists<0.9*w/dx] = 0 # set point bar thickness to zero inside of oxbows
+                        # adding back sand near the channel axis (submarine only):
+                        #th[cl_dist<0.5*w/dx] = bth*(1 - relief[cl_dist<0.5*w/dx]/dcr) #This term
+                        #pdb.set_trace()
+                        th[cl_dist<0.3*w/dx] = bth*(1 - relief[cl_dist<0.3*w/dx]/dcr) #This term
+                        #pdb.set_trace()
+
+
+                    else: # no cutoffs
+                        th_oxbows = np.zeros(np.shape(th))
+                    surf = surf+th_oxbows # update topographic surface with oxbow deposit thickness
+                    topo[:,:,4*i+2] = surf # top of oxbow mud
+                    facies[4*i+2] = 0
+                    
+                    surf = surf+th # update topographic surface with sand thickness
+                    topo[:,:,4*i+3] = surf # top of sand
+                    facies[4*i+3] = 1
+                    
+                    
+                    #sinuosity=2 #bs dummy value
+                    channels3D.append(Channel(x1-xmin,y1-ymin,z1,w,h))
+
+            cl_dist_prev = cl_dist.copy()
+        topo = np.concatenate((np.reshape(topoinit,(iheight,iwidth,1)),topo),axis=2) # add initial topography to array
+        strat = topostrat(topo) # create stratigraphic surfaces
+        strat = np.delete(strat, np.arange(4*n_steps+1)[1::4], 2) # get rid of unnecessary stratigraphic surfaces (duplicates)
+        facies = np.delete(facies, np.arange(4*n_steps)[::4]) # get rid of unnecessary facies layers (NaNs)
+        if model_type == 'fluvial':
+            facies_code = {0:'oxbow', 1:'point bar', 2:'levee'}
+        if model_type == 'submarine':
+            facies_code = {0:'oxbow', 1:'channel sand', 2:'levee', 3:'MTD'}
+        chb_3d = ChannelBelt3D(model_type,topo,strat,facies,facies_code,dx,channels3D)
+        return chb_3d, xmin, xmax, ymin, ymax,indices, dists, zmaps
+
+
+    def build_3d_model_PM_MTD_RANDOM(self,model_type,h_mud,levee_width,h,w,bth,dcr,dx,delta_s,starttime,endtime,xmin,xmax,ymin,ymax,CLZjump,TurbidityCurrentHeight):
+        """method for building 3D model from set of centerlines (that are part of a ChannelBelt object)
+        Inputs:
+        model_type - model type ('fluvial' or 'submarine')
+        h_mud - maximum thickness of overbank mud
+        levee_width - width of overbank mud
+        h - channel depth
+        w - channel width
+        bth - thickness of channel sand (only used in submarine models)
+        dcr - critical channel depth where sand thickness goes to zero (only used in submarine models)
+        dx - cell size in x and y directions
+        delta_s - sampling distance alogn centerlines
+        starttime - age of centerline that will be used as the first centerline in the model
+        endtime - age of centerline that will be used as the last centerline in the model
+        xmin,xmax,ymin,ymax - x and y coordinates that define the model domain; if xmin is set to zero,
+        a plot of the centerlines is generated and the model domain has to be defined by clicking its upper
+        left and lower right corners
+        Returns: a ChannelBelt3D object
+        """
+        #pdb.set_trace()
+        sclt = np.array(self.cl_times)
+        #ind1 = np.where(sclt>=starttime)[0][0]
+        ind1 = 1 #Remove initial centerline as its straight PAUL CHANGE 
+        ind2 = np.where(sclt<=endtime)[0][-1]
+        sclt = sclt[ind1:ind2+1]
+        #pdb.set_trace()
+        channels = self.channels[ind1:ind2+1]
+        MTDs=self.MTDs[ind1:ind2+1]
+        MTD_times=np.array(self.MTD_times)
+        #sinuosity=channels.sinuosity
+        cot = np.array(self.cutoff_times)
+        if (len(cot)>0) & (len(np.where(cot>=starttime)[0])>0) & (len(np.where(cot<=endtime)[0])>0): #If cutoff has occured...
+            cfind1 = np.where(cot>=starttime)[0][0]
+            cfind2 = np.where(cot<=endtime)[0][-1]
+            cot = cot[cfind1:cfind2+1]
+            cutoffs = self.cutoffs[cfind1:cfind2+1]
+        else:
+            cot = []
+            cutoffs = []
+        #pdb.set_trace()
+        n_steps = len(sclt) #CENTERLINES AND MTDS COMBINED
+         # number of events
+
+        #MTD_Event=np.argwhere(sclt==MTD_times) #Return Argument where MTD event occurs
+
+        if xmin == 0: # plot centerlines and define model domain
+            plt.figure(figsize=(15,4))
+            maxX, minY, maxY = 0, 0, 0
+            for i in range(n_steps): # plot centerlines
+                #Need to plot MTD centerline?
+                plt.plot(channels[i].x,channels[i].y,'k')
+                maxX = max(maxX,np.max(channels[i].x))
+                maxY = max(maxY,np.max(channels[i].y))
+                minY = min(minY,np.min(channels[i].y))
+            plt.axis([0,maxX,minY-10*w,maxY+10*w])
+            plt.gca().set_aspect('equal', adjustable='box')
+            plt.tight_layout()
+            pts = np.zeros((2,2))
+            for i in range(0,2):
+                pt = np.asarray(plt.ginput(1))
+                pts[i,:] = pt
+                plt.scatter(pt[0][0],pt[0][1])
+            plt.plot([pts[0,0],pts[1,0],pts[1,0],pts[0,0],pts[0,0]],[pts[0,1],pts[0,1],pts[1,1],pts[1,1],pts[0,1]],'r')
+            xmin = min(pts[0,0],pts[1,0])
+            xmax = max(pts[0,0],pts[1,0])
+            ymin = min(pts[0,1],pts[1,1])
+            ymax = max(pts[0,1],pts[1,1])
+        iwidth = int((xmax-xmin)/dx)
+        iheight = int((ymax-ymin)/dx)
+        topo = np.zeros((iheight,iwidth,4*n_steps)) # array for storing topographic surfaces
+
+        dists = np.zeros((iheight,iwidth,n_steps))
+        zmaps = np.zeros((iheight,iwidth,n_steps))
+
+        facies = np.zeros((4*n_steps,1))
+        # create initial topography:
+        x1 = np.linspace(0,iwidth-1,iwidth)
+        y1 = np.linspace(0,iheight-1,iheight)
+        xv, yv = np.meshgrid(x1,y1)
+        z1 = channels[0].z
+        z1 = z1[(channels[0].x>xmin) & (channels[0].x<xmax)]
+        topoinit = z1[0] - ((z1[0]-z1[-1])/(xmax-xmin))*xv*dx # initial (sloped) topography
+        topo[:,:,0] = topoinit.copy()
+        surf = topoinit.copy()
+        facies[0] = np.NaN
+        # generate surfaces:
+        channels3D = []
+
+        indices = np.where(np.in1d(sclt, MTD_times))[0] # Which indices in SCLT correspond to MTD_times
+        #pdb.set_trace()
+        for i in range(n_steps):
+            update_progress(i/n_steps)
+            x = channels[i].x
+            y = channels[i].y
+            z = channels[i].z
+            cutoff_ind = []
+            # check if there were cutoffs during the last time step and collect indices in an array:
+            for j in range(len(cot)):
+                #pdb.set_trace()
+                if (cot[j] >= sclt[i-1]) & (cot[j] < sclt[i]):
+                    cutoff_ind = np.append(cutoff_ind,j)
+            # create distance map: PM ADDED XINDS AND YINDS OUTPUT
+            #pdb.set_trace()
+            cl_dist, x_pix, y_pix, z_pix, s_pix, z_map, x1, y1, z1, xinds, yinds = dist_map(x,y,z,xmin,xmax,ymin,ymax,dx,delta_s)
+            if i == 0:
+                cl_dist_prev = cl_dist
+
+            ##############################MTD############################################
+            if i in indices: #This checks whether the centerline is an MTD one!
+                #pdb.set_trace()
+
+                w_mtd=w*1
+
+                h_mtd=h*1
+
+                
+                ######################EROSION
+                #surf = np.minimum(surf,erosion_surface(h_mtd,w_mtd/dx,cl_dist,z_map))
+                surf=erosion_surface(h_mtd,w_mtd/dx,cl_dist,z_map)
+
+                topo[:,:,4*i] = surf # erosional surface
+                dists[:,:,i] = cl_dist
+                zmaps[:,:,i] = z_map
+                facies[4*i] = np.NaN
+
+                ######################MUD
+                #CL_Start_Index=self.cl_times.index(starttime) #Finds the centerline NUMBER (not its "age")
+                #pdb.set_trace()
+                #if CLZjump[CL_Start_Index+i]<0:
+                 #   h_mud=0.5
+
+                #elif CLZjump[CL_Start_Index+i]==0:
+                 #   h_mud=2
+
+                #elif CLZjump[CL_Start_Index+i]>0:
+                 #   h_mud=math.ceil(CLZjump[CL_Start_Index+i]+bth)
+
+                #height_mud_map=Levee_Height_Control(surf,x_pix,y_pix,z_pix,TurbidityCurrentHeight,xinds,yinds)
+
+                #mud_surf=mud_surface(h_mud,levee_width/dx,cl_dist,w_mtd/dx)
+
+                #height_corrected_mud_surf=np.multiply(height_mud_map,mud_surf)
+
+                #surf= surf + height_corrected_mud_surf # mud/levee deposition
+
+                topo[:,:,4*i+1] = surf # top of levee
+                facies[4*i+1] = np.NaN
+
+                   # sand (MTD) thickness:
+
+                bth_mtd=0.25*h
+                #th, relief = sand_surface(surf,bth_mtd,dcr,z_map,h_mtd)
+
+                surf = Random_Stacking_Fill(surf,bth,dcr,z,h,w,cl_dist)
+
+                #th[th<0] = 0 # eliminate negative th values
+                #th[cl_dist>1.0*w_mtd/dx] = 0 # eliminate sand outside of channel
+                #th_oxbows = th.copy()
+                # setting sand thickness to zero at cutoff locations:
+                #if len(cutoff_ind)>0:
+                    #pdb.set_trace()
+                #    cutoff_dists = 1e10*np.ones(np.shape(th)) #initialize cutoff_dists with a large number
+                #    for j in range(len(cutoff_ind)):
+                #        cutoff_dist, cfx_pix, cfy_pix = cl_dist_map(cutoffs[int(cutoff_ind[j])].x[0],cutoffs[int(cutoff_ind[j])].y[0],cutoffs[int(cutoff_ind[j])].z[0],xmin,xmax,ymin,ymax,dx)
+                #        cutoff_dists = np.minimum(cutoff_dists,cutoff_dist)
+                #    th_oxbows[cutoff_dists>=0.9*w_mtd/dx] = 0 # set oxbow fill thickness to zero outside of oxbows
+                #    th[cutoff_dists<0.9*w_mtd/dx] = 0 # set point bar thickness to zero inside of oxbows
+                    # adding back sand near the channel axis (submarine only):
+                    # th[cl_dist<0.5*w/dx] = bth*(1 - relief[cl_dist<0.5*w/dx]/dcr)
+                #else: # no cutoffs
+                #    th_oxbows = np.zeros(np.shape(th))
+                #surf = surf+th_oxbows # update topographic surface with oxbow deposit thickness
+                #topo[:,:,4*i+2] = surf # top of oxbow mud
+                facies[4*i+2] = np.NaN
+                
+                #surf = surf+th # update topographic surface with sand thickness
+                topo[:,:,4*i+3] = surf # top of sand
+                facies[4*i+3] = 3 #Facies = MTD
+
+                channels3D.append(Channel(x1-xmin,y1-ymin,z1,w_mtd,h_mtd))
+
+            else:
+            #############################################################################
+
+                # erosion:
+                #surf = np.minimum(surf,erosion_surface(h,w/dx,cl_dist,z_map))
+
+                    surf=erosion_surface(h,w/dx,cl_dist,z_map)
+
+                     #   h_mud=CLZjump[CL_Start_Index+i]+bth
+                    
+                    #pdb.set_trace()
+                    #height_mud_map=Levee_Height_Control(surf,x_pix,y_pix,z_pix,TurbidityCurrentHeight,xinds,yinds)
+
+                    #mud_surf=mud_surface(h_mud,levee_width/dx,cl_dist,w/dx,z_map,surf) #conventional mud sepsoition
+                    #mud_surf=mud_surface(h_mud,levee_width/dx,cl_dist,w/dx)
+
+                    #height_corrected_mud_surf=np.multiply(height_mud_map,mud_surf)
+
+                    #surf=surf+mud_surf
+                    #surf= surf + height_corrected_mud_surf # mud/levee deposition
+
+                    topo[:,:,4*i+1] = surf # top of levee
+                    facies[4*i+1] = np.NaN
+
+
+                    # sand thickness:
+                    #th, relief = sand_surface(surf,bth,dcr,z_map,h)
+                    surf = Random_Stacking_Fill(surf,bth,dcr,z,h,w,cl_dist)
+
+                    #th[th<0] = 0 # eliminate negative th values
+                    #th[cl_dist>1.0*w/dx] = 0 # eliminate sand outside of channel
+                    #th_oxbows = th.copy()
+                    # setting sand thickness to zero at cutoff locations:
+                    #if len(cutoff_ind)>0:
+                        #pdb.set_trace()
+                    #    cutoff_dists = 1e10*np.ones(np.shape(th)) #initialize cutoff_dists with a large number
+                    #    for j in range(len(cutoff_ind)):
+                    #        cutoff_dist, cfx_pix, cfy_pix = cl_dist_map(cutoffs[int(cutoff_ind[j])].x[0],cutoffs[int(cutoff_ind[j])].y[0],cutoffs[int(cutoff_ind[j])].z[0],xmin,xmax,ymin,ymax,dx)
+                    #        cutoff_dists = np.minimum(cutoff_dists,cutoff_dist)
+                    #    th_oxbows[cutoff_dists>=0.9*w/dx] = 0 # set oxbow fill thickness to zero outside of oxbows
+                    #    th[cutoff_dists<0.9*w/dx] = 0 # set point bar thickness to zero inside of oxbows
+                        # adding back sand near the channel axis (submarine only):
+                        #th[cl_dist<0.5*w/dx] = bth*(1 - relief[cl_dist<0.5*w/dx]/dcr) #This term
+                        #pdb.set_trace()
+                    #    th[cl_dist<0.3*w/dx] = bth*(1 - relief[cl_dist<0.3*w/dx]/dcr) #This term
+                        #pdb.set_trace()
+
+
+                    #else: # no cutoffs
+                     #   th_oxbows = np.zeros(np.shape(th))
+                    #surf = surf+th_oxbows # update topographic surface with oxbow deposit thickness
+                    #topo[:,:,4*i+2] = surf # top of oxbow mud
+                    #facies[4*i+2] = 0
+
+                    #pdb.set_trace()
+                    #surf = surf+th # update topographic surface with sand thickness
+                    topo[:,:,4*i+3] = surf # top of sand
+                    facies[4*i+3] = 1
+                    
+                    
+                    #sinuosity=2 #bs dummy value
+                    channels3D.append(Channel(x1-xmin,y1-ymin,z1,w,h))
+
+            cl_dist_prev = cl_dist.copy()
+        topo = np.concatenate((np.reshape(topoinit,(iheight,iwidth,1)),topo),axis=2) # add initial topography to array
+        strat = topostrat(topo) # create stratigraphic surfaces
+        strat = np.delete(strat, np.arange(4*n_steps+1)[1::4], 2) # get rid of unnecessary stratigraphic surfaces (duplicates)
+        facies = np.delete(facies, np.arange(4*n_steps)[::4]) # get rid of unnecessary facies layers (NaNs)
+        if model_type == 'fluvial':
+            facies_code = {0:'oxbow', 1:'point bar', 2:'levee'}
+        if model_type == 'submarine':
+            facies_code = {0:'oxbow', 1:'channel sand', 2:'levee', 3:'MTD'}
+        chb_3d = ChannelBelt3D(model_type,topo,strat,facies,facies_code,dx,channels3D)
+        return chb_3d, xmin, xmax, ymin, ymax,indices, dists, zmaps
+
+
+
+
+    def build_3d_model_PM_MTD_RANDOM2(self,model_type,h_mud,levee_width,h,w,bth,dcr,dx,delta_s,starttime,endtime,xmin,xmax,ymin,ymax,CLZjump,TurbidityCurrentHeight,no_agg,low_agg,med_agg,high_agg):
+        """method for building 3D model from set of centerlines (that are part of a ChannelBelt object)
+        Inputs:
+        model_type - model type ('fluvial' or 'submarine')
+        h_mud - maximum thickness of overbank mud
+        levee_width - width of overbank mud
+        h - channel depth
+        w - channel width
+        bth - thickness of channel sand (only used in submarine models)
+        dcr - critical channel depth where sand thickness goes to zero (only used in submarine models)
+        dx - cell size in x and y directions
+        delta_s - sampling distance alogn centerlines
+        starttime - age of centerline that will be used as the first centerline in the model
+        endtime - age of centerline that will be used as the last centerline in the model
+        xmin,xmax,ymin,ymax - x and y coordinates that define the model domain; if xmin is set to zero,
+        a plot of the centerlines is generated and the model domain has to be defined by clicking its upper
+        left and lower right corners
+        Returns: a ChannelBelt3D object
+        """
+        #pdb.set_trace()
+        sclt = np.array(self.cl_times)
+        #ind1 = np.where(sclt>=starttime)[0][0]
+        ind1 = 1 #Remove initial centerline as its straight PAUL CHANGE 
+        ind2 = np.where(sclt<=endtime)[0][-1]
+        sclt = sclt[ind1:ind2+1]
+        #pdb.set_trace()
+        channels = self.channels[ind1:ind2+1]
+        MTDs=self.MTDs[ind1:ind2+1]
+        MTD_times=np.array(self.MTD_times)
+        #sinuosity=channels.sinuosity
+        cot = np.array(self.cutoff_times)
+        if (len(cot)>0) & (len(np.where(cot>=starttime)[0])>0) & (len(np.where(cot<=endtime)[0])>0): #If cutoff has occured...
+            cfind1 = np.where(cot>=starttime)[0][0]
+            cfind2 = np.where(cot<=endtime)[0][-1]
+            cot = cot[cfind1:cfind2+1]
+            cutoffs = self.cutoffs[cfind1:cfind2+1]
+        else:
+            cot = []
+            cutoffs = []
+        #pdb.set_trace()
+        n_steps = len(sclt) #CENTERLINES AND MTDS COMBINED
+         # number of events
+
+        #MTD_Event=np.argwhere(sclt==MTD_times) #Return Argument where MTD event occurs
+
+        if xmin == 0: # plot centerlines and define model domain
+            plt.figure(figsize=(15,4))
+            maxX, minY, maxY = 0, 0, 0
+            for i in range(n_steps): # plot centerlines
+                #Need to plot MTD centerline?
+                plt.plot(channels[i].x,channels[i].y,'k')
+                maxX = max(maxX,np.max(channels[i].x))
+                maxY = max(maxY,np.max(channels[i].y))
+                minY = min(minY,np.min(channels[i].y))
+            plt.axis([0,maxX,minY-10*w,maxY+10*w])
+            plt.gca().set_aspect('equal', adjustable='box')
+            plt.tight_layout()
+            pts = np.zeros((2,2))
+            for i in range(0,2):
+                pt = np.asarray(plt.ginput(1))
+                pts[i,:] = pt
+                plt.scatter(pt[0][0],pt[0][1])
+            plt.plot([pts[0,0],pts[1,0],pts[1,0],pts[0,0],pts[0,0]],[pts[0,1],pts[0,1],pts[1,1],pts[1,1],pts[0,1]],'r')
+            xmin = min(pts[0,0],pts[1,0])
+            xmax = max(pts[0,0],pts[1,0])
+            ymin = min(pts[0,1],pts[1,1])
+            ymax = max(pts[0,1],pts[1,1])
+        iwidth = int((xmax-xmin)/dx)
+        iheight = int((ymax-ymin)/dx)
+        topo = np.zeros((iheight,iwidth,4*n_steps)) # array for storing topographic surfaces
+
+        dists = np.zeros((iheight,iwidth,n_steps))
+        zmaps = np.zeros((iheight,iwidth,n_steps))
+
+        facies = np.zeros((4*n_steps,1))
+        # create initial topography:
+        x1 = np.linspace(0,iwidth-1,iwidth)
+        y1 = np.linspace(0,iheight-1,iheight)
+        xv, yv = np.meshgrid(x1,y1)
+        z1 = channels[0].z
+        z1 = z1[(channels[0].x>xmin) & (channels[0].x<xmax)]
+        topoinit = z1[0] - ((z1[0]-z1[-1])/(xmax-xmin))*xv*dx # initial (sloped) topography
+        topo[:,:,0] = topoinit.copy()
+        surf = topoinit.copy()
+        facies[0] = np.NaN
+        # generate surfaces:
+        channels3D = []
+
+        indices = np.where(np.in1d(sclt, MTD_times))[0] # Which indices in SCLT correspond to MTD_times
+        #pdb.set_trace()
+        for i in range(n_steps):
+            update_progress(i/n_steps)
+            x = channels[i].x
+            y = channels[i].y
+            z = channels[i].z
+            cutoff_ind = []
+            # check if there were cutoffs during the last time step and collect indices in an array:
+            for j in range(len(cot)):
+                #pdb.set_trace()
+                if (cot[j] >= sclt[i-1]) & (cot[j] < sclt[i]):
+                    cutoff_ind = np.append(cutoff_ind,j)
+            # create distance map: PM ADDED XINDS AND YINDS OUTPUT
+            #pdb.set_trace()
+            cl_dist, x_pix, y_pix, z_pix, s_pix, z_map, x1, y1, z1, xinds, yinds = dist_map(x,y,z,xmin,xmax,ymin,ymax,dx,delta_s)
+            if i == 0:
+                cl_dist_prev = cl_dist
+
+            ##############################MTD############################################
+            if i in indices: #This checks whether the centerline is an MTD one!
+                #pdb.set_trace()
+
+                w_mtd=w*1
+
+                h_mtd=h*1
+
+                
+                ######################EROSION
+                surf = np.minimum(surf,erosion_surface(h_mtd,w_mtd/dx,cl_dist,z_map))
+                topo[:,:,4*i] = surf # erosional surface
+                dists[:,:,i] = cl_dist
+                zmaps[:,:,i] = z_map
+                facies[4*i] = np.NaN
+
+                ######################MUD
+                CL_Start_Index=self.cl_times.index(starttime) #Finds the centerline NUMBER (not its "age")
+                #pdb.set_trace()
+                if CLZjump[CL_Start_Index+i]<0:
+                    h_mud=0.5
+
+                elif CLZjump[CL_Start_Index+i]==0:
+                    h_mud=2
+
+                elif CLZjump[CL_Start_Index+i]>0:
+                    h_mud=math.ceil(CLZjump[CL_Start_Index+i]+bth)
+
+                height_mud_map=Levee_Height_Control(surf,x_pix,y_pix,z_pix,TurbidityCurrentHeight,xinds,yinds)
+
+                mud_surf=mud_surface(h_mud,levee_width/dx,cl_dist,w_mtd/dx)
+
+                height_corrected_mud_surf=np.multiply(height_mud_map,mud_surf)
+
+                surf= surf + height_corrected_mud_surf # mud/levee deposition
+
+                topo[:,:,4*i+1] = surf # top of levee
+                facies[4*i+1] = 2
+
+                   # sand (MTD) thickness:
+
+                bth_mtd=0.25*h
+                th, relief = sand_surface(surf,bth_mtd,dcr,z_map,h_mtd)
+                th[th<0] = 0 # eliminate negative th values
+                th[cl_dist>1.0*w_mtd/dx] = 0 # eliminate sand outside of channel
+                th_oxbows = th.copy()
+                # setting sand thickness to zero at cutoff locations:
+                if len(cutoff_ind)>0:
+                    #pdb.set_trace()
+                    cutoff_dists = 1e10*np.ones(np.shape(th)) #initialize cutoff_dists with a large number
+                    for j in range(len(cutoff_ind)):
+                        cutoff_dist, cfx_pix, cfy_pix = cl_dist_map(cutoffs[int(cutoff_ind[j])].x[0],cutoffs[int(cutoff_ind[j])].y[0],cutoffs[int(cutoff_ind[j])].z[0],xmin,xmax,ymin,ymax,dx)
+                        cutoff_dists = np.minimum(cutoff_dists,cutoff_dist)
+                    th_oxbows[cutoff_dists>=0.9*w_mtd/dx] = 0 # set oxbow fill thickness to zero outside of oxbows
+                    th[cutoff_dists<0.9*w_mtd/dx] = 0 # set point bar thickness to zero inside of oxbows
+                    # adding back sand near the channel axis (submarine only):
+                    # th[cl_dist<0.5*w/dx] = bth*(1 - relief[cl_dist<0.5*w/dx]/dcr)
+                else: # no cutoffs
+                    th_oxbows = np.zeros(np.shape(th))
+                surf = surf+th_oxbows # update topographic surface with oxbow deposit thickness
+                topo[:,:,4*i+2] = surf # top of oxbow mud
+                facies[4*i+2] = 0
+                
+                surf = surf+th # update topographic surface with sand thickness
+                topo[:,:,4*i+3] = surf # top of sand
+                facies[4*i+3] = 3 #Facies = MTD
+
+                channels3D.append(Channel(x1-xmin,y1-ymin,z1,w_mtd,h_mtd))
+
+            else:
+            #############################################################################
+
+                # erosion:
+                surf = np.minimum(surf,erosion_surface(h,w/dx,cl_dist,z_map))
+                topo[:,:,4*i] = surf # erosional surface
+                dists[:,:,i] = cl_dist
+                zmaps[:,:,i] = z_map
+                facies[4*i] = np.NaN
+
+
+                if model_type == 'fluvial':
+                    pb = point_bar_surface(cl_dist,z_map,h,w/dx)
+                    th = np.maximum(surf,pb)-surf
+                    th_oxbows = th.copy()
+                    # setting sand thickness to zero at cutoff locations:
+                    if len(cutoff_ind)>0:
+                        #pdb.set_trace()
+                        cutoff_dists = 1e10*np.ones(np.shape(th)) #initialize cutoff_dists with a large number
+                        for j in range(len(cutoff_ind)):
+                            cutoff_dist, cfx_pix, cfy_pix = cl_dist_map(cutoffs[int(cutoff_ind[j])].x[0],cutoffs[int(cutoff_ind[j])].y[0],cutoffs[int(cutoff_ind[j])].z[0],xmin,xmax,ymin,ymax,dx)
+                            cutoff_dists = np.minimum(cutoff_dists,cutoff_dist)
+                        th_oxbows[cutoff_dists>=0.9*w/dx] = 0 # set oxbow fill thickness to zero outside of oxbows
+                        th[cutoff_dists<0.9*w/dx] = 0 # set point bar thickness to zero inside of oxbows
+                    else: # no cutoffs
+                        th_oxbows = np.zeros(np.shape(th))
+                    th[th<0] = 0 # eliminate negative th values
+                    surf = surf+th_oxbows # update topographic surface with oxbow deposit thickness
+                    topo[:,:,4*i+1] = surf # top of oxbow mud
+                    facies[4*i+1] = 0
+                    surf = surf+th # update topographic surface with sand thickness
+                    topo[:,:,4*i+2] = surf # top of sand
+                    facies[4*i+2] = 1
+                    surf = surf + mud_surface(h_mud,levee_width/dx,cl_dist,w/dx,z_map,surf) # mud/levee deposition
+                    topo[:,:,4*i+3] = surf # top of levee
+                    facies[4*i+3] = 2
+                    channels3D.append(Channel(x1-xmin,y1-ymin,z1,w,h))
+
+                if model_type == 'submarine':
+                    #DEFINE MUD THICKNESS AND DEPOSIT MUD OVER MODEL
+
+                    #CL_Start_Index=self.cl_times.index(starttime) #Finds the centerline NUMBER (not its "age")
+                    #pdb.set_trace()
+
+                    ####MUD DEPOSITION###########
+                
+                    if i<no_agg:
+                        h_mud=5
+                #levee_width=2000
+
+                    #elif CLZjump[CL_Start_Index+i]==0:
+                    elif i<=low_agg:
+                        h_mud=13
+
+                    elif i<=med_agg:
+                        h_mud=13
+
+                    elif i<=high_agg:
+                        h_mud=13
+
+                #levee_width=2000
+
+                    #elif CLZjump[]
+
+                   #elif CLZjump[CL_Start_Index+i]>0:
+                        #pdb.set_trace()
+                        #h_mud=math.ceil(CLZjump[CL_Start_Index+i]*1.4)
+
+                    #    h_mud=CLZjump[CL_Start_Index+i]+bth
+                    
+                    #pdb.set_trace()
+                    height_mud_map=Levee_Height_Control(surf,x_pix,y_pix,z_pix,TurbidityCurrentHeight,xinds,yinds)
+
+                    #mud_surf=mud_surface(h_mud,levee_width/dx,cl_dist,w/dx,z_map,surf) #conventional mud sepsoition
+                    mud_surf=mud_surface(h_mud,levee_width/dx,cl_dist,w/dx)
+
+                    height_corrected_mud_surf=np.multiply(height_mud_map,mud_surf)
+
+                    #surf=surf+mud_surf
+                    surf= surf + height_corrected_mud_surf # mud/levee deposition
+
+                    topo[:,:,4*i+1] = surf # top of levee
+                    facies[4*i+1] = 2
+
+
+                    # sand thickness:
+                    th, relief = sand_surface(surf,bth,dcr,z_map,h)
+                    th[th<0] = 0 # eliminate negative th values
+                    th[cl_dist>1.0*w/dx] = 0 # eliminate sand outside of channel
+                    th_oxbows = th.copy()
+                    # setting sand thickness to zero at cutoff locations:
+                    if len(cutoff_ind)>0:
+                        #pdb.set_trace()
+                        cutoff_dists = 1e10*np.ones(np.shape(th)) #initialize cutoff_dists with a large number
+                        for j in range(len(cutoff_ind)):
+                            cutoff_dist, cfx_pix, cfy_pix = cl_dist_map(cutoffs[int(cutoff_ind[j])].x[0],cutoffs[int(cutoff_ind[j])].y[0],cutoffs[int(cutoff_ind[j])].z[0],xmin,xmax,ymin,ymax,dx)
+                            cutoff_dists = np.minimum(cutoff_dists,cutoff_dist)
+                        th_oxbows[cutoff_dists>=0.9*w/dx] = 0 # set oxbow fill thickness to zero outside of oxbows
+                        th[cutoff_dists<0.9*w/dx] = 0 # set point bar thickness to zero inside of oxbows
+                        # adding back sand near the channel axis (submarine only):
+                        #th[cl_dist<0.5*w/dx] = bth*(1 - relief[cl_dist<0.5*w/dx]/dcr) #This term
+                        #pdb.set_trace()
+                        th[cl_dist<0.3*w/dx] = bth*(1 - relief[cl_dist<0.3*w/dx]/dcr) #This term
+                        #pdb.set_trace()
+
+
+                    else: # no cutoffs
+                        th_oxbows = np.zeros(np.shape(th))
+                    surf = surf+th_oxbows # update topographic surface with oxbow deposit thickness
+                    topo[:,:,4*i+2] = surf # top of oxbow mud
+                    facies[4*i+2] = 0
+                    
+                    surf = surf+th # update topographic surface with sand thickness
+                    topo[:,:,4*i+3] = surf # top of sand
+                    facies[4*i+3] = 1
+                    
+                    
+                    #sinuosity=2 #bs dummy value
+                    channels3D.append(Channel(x1-xmin,y1-ymin,z1,w,h))
+
+            cl_dist_prev = cl_dist.copy()
+        topo = np.concatenate((np.reshape(topoinit,(iheight,iwidth,1)),topo),axis=2) # add initial topography to array
+        strat = topostrat(topo) # create stratigraphic surfaces
+        strat = np.delete(strat, np.arange(4*n_steps+1)[1::4], 2) # get rid of unnecessary stratigraphic surfaces (duplicates)
+        facies = np.delete(facies, np.arange(4*n_steps)[::4]) # get rid of unnecessary facies layers (NaNs)
+        if model_type == 'fluvial':
+            facies_code = {0:'oxbow', 1:'point bar', 2:'levee'}
+        if model_type == 'submarine':
+            facies_code = {0:'oxbow', 1:'channel sand', 2:'levee', 3:'MTD'}
+        chb_3d = ChannelBelt3D(model_type,topo,strat,facies,facies_code,dx,channels3D)
+        return chb_3d, xmin, xmax, ymin, ymax,indices, dists, zmaps
+
+
+    #def migrate_VariableTrajectory(x,y,nit,saved_ts,W,D,deltas,pad,Sl,crdist,k,Cf,omega,gamma,kl,kv,dt,dens,c,R,ax,dz_trajectoryupdip,dz_trajectorydowndip):
+    def migrate_VariableTrajectory(self,nit,saved_ts,deltas,pad,crdist,Cf,kl,kv,dt,dens,dz_trajectoryupdip,dz_trajectorydowndip,*D,sinuosity):
+        """ function for running the Howard & Knutson model with variable slope
+        INPUTS:
+        nit - number of iterations
+        saved_ts - saved timesteps
+        W - channel width (meters)
+        D - channel depth (meters)
+        deltas - distance between ceonsecutive points along the centerline
+        pd - padding (number of centerline points at beginning and end of model that are kept immobile)
+        Sl -  overall (valley) slope that initial straight centerline starts out with (m/m)
+        crdist - critical cutoff distance (meters)
+        Cf - dimensionless Chezy friction factor
+        kl - lateral erosion rate constant (m/s)
+        kv - vertical slope-dependent erosion rate constant (m/s)
+        dt - time step (s)
+        dens - density of seawater (kg/m^3)
+        c - concentration of turbidity current
+        R - excess sediment density [(ro_sed-ro_water)/ro_water]
+        OUTPUTS:
+
+        curvs - list of curvature values for saved centerlines
+        """
+
+
+        channel = self.channels[-1] # first channel is the same as last channel of input
+        x = channel.x; y = channel.y; z = channel.z
+        W = channel.W; #sinuosity=channel.sinuosity
+        
+
+        if len(D)==0:
+            D = channel.D
+        else:
+            D = D[0]
+        k = 1.0 # constant in HK equation
+        xc = [] # initialize cutoff coordinates
+        # determine age of last channel:
+        if len(self.cl_times)>0:
+            last_cl_time = self.cl_times[-1]
+        else:
+            last_cl_time = 0
+        dx, dy, dz, ds, s = compute_derivatives(x,y,z)
+        slope = np.gradient(z)/ds
+        # padding at the beginning can be shorter than padding at the downstream end:
+        pad1 = int(pad/10.0)
+        if pad1<5:
+            pad1 = 5
+        omega = -1.0 # constant in curvature calculation (Howard and Knutson, 1984)
+        gamma = 2.5 # from Ikeda et al., 1981 and Howard and Knutson, 1984
+        for itn in range(nit): # main loop
+            update_progress(itn/nit)
+            ns=len(x) #PM
+            x, y,sin = migrate_one_step(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma)
+            # x, y = migrate_one_step_w_bias(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma)
+            x,y,z,xc,yc,zc = cut_off_cutoffs(x,y,z,s,crdist,deltas) # find and execute cutoffs
+            x,y,z,dx,dy,dz,ds,s = resample_centerline(x,y,z,deltas) # resample centerline
+            slope = np.gradient(z)/ds
+            # slope-dependent erosion:
+            #z = z + kv*dens*R*c*9.81*D*slope*dt/(1+0.5) #Specific erosion at every nodes
+
+
+            #############
+            #Elevation Change by node
+            #############
+
+            dzvalueupdip_atnit=dz_trajectoryupdip[itn]
+            dzvaluedowndip_atnit=dz_trajectorydowndip[itn]
+            dz_eachnode=np.empty_like(z)
+
+            for nodes in range(len(z)):
+
+                dz_eachnode[nodes]=dzvalueupdip_atnit*(ns-nodes)/ns+dzvaluedowndip_atnit*(nodes/ns)
+
+            z=z+dz_eachnode
+
+            if len(xc)>0: # save cutoff data
+                self.cutoff_times.append(last_cl_time+(itn+1)*dt/(365*24*60*60.0))
+                cutoff = Cutoff(xc,yc,zc,W,D) # create cutoff object
+                self.cutoffs.append(cutoff)
+            # saving centerlines:
+            if np.mod(itn,saved_ts)==0:
+                self.cl_times.append(last_cl_time+(itn+1)*dt/(365*24*60*60.0))
+                channel = Channel(x,y,z,W,D) # create channel object
+                self.channels.append(channel)
+                
+                sinuosity.append(sin)
+                
+                
+        fig=ChannelBelt.Plot_HKSinuosity(self,sinuosity)
+            #channels=self.channels
+            #cutoffs=self.cutoffs
+            #cutoff_times=self.cutoff_times
+            #cl_times=self.cl_times
+        return fig
+            #chb=ChannelBelt(channels, cutoffs, cl_times, cutoff_times)
+            
+            #return chb
+    
+    def Plot_HKSinuosity(self,sinuosity):
+        #sinuosities=[]
+        saved_cl_times=self.cl_times
+
+        #pdb.set_trace()
+        #for i in range(0,len(saved_cl_times)):
+            
+         #   channels=self.channels[i]
+            
+          #  sinuosity=channels.sinuosity
+            
+           # sinuosities.append(sinuosity)
+            
+        ##########
+        #Plots how sinuosity of channel changes in time (iterations of hk)
+        #########
+        #pdb.set_trace()
+        fig=plt.figure()
+        plt.plot(saved_cl_times,sinuosity, 'r-')
+        plt.ylabel("Sinuosity", fontsize=18,weight='bold')
+        plt.xlabel("Centerline Number", fontsize=18, weight='bold') #hk number
+        plt.title('Sinuosity Variation By Centerline Along Entire Reach',fontsize=18, weight='bold')
+        plt.ylim(bottom=1.0)
+        plt.show()
+        
+        return fig
+
+    def Plot_JoshuaSinuosity(self,sinuosity,Z):#CLZjump
+
+    ##########
+    #Plots how sinuosity of channel changes in time (iterations of hk)
+    #########
+        
+        saved_cl_times=self.cl_times 
+        Zmean=[]
+        for i in range(0,len(Z)):
+
+           zmean=np.mean(Z[i])
+
+           Zmean.append(zmean)
+
+        pdb.set_trace()
+        
+        Aggradation=np.diff(Zmean,prepend=Zmean[0])
+        CumulativeAggradation=np.cumsum(Aggradation)
+        fig = plt.figure()
+        ax=fig.add_subplot(111)
+        ax2 = ax.twinx()
+        Sinuosity_Line=ax.plot(saved_cl_times, Sinuosity, 'r-', label='Sinuosity')
+        Aggradation_Line=ax2.plot(saved_cl_times, CumulativeAggradation, 'b--',label=' Aggradation')
+        ax.set_ylabel("Sinuosity", fontsize=24,weight='bold')
+        ax.tick_params(labelsize=18)
+        ax2.set_ylabel("Mean Aggradation (m)",fontsize=24,weight='bold')
+        ax2.tick_params(labelsize=18)
+        ax.set_xlabel("Centerline Number", fontsize=24, weight='bold') #hk number
+        plt.title('Sinuosity Variation By Centerline',fontsize=24, weight='bold')
+        ax.set_ylim(bottom=1.0)
+
+        lns=Sinuosity_Line+Aggradation_Line
+        labs = [l.get_label() for l in lns]
+        ax.legend(lns, labs, loc=0, fontsize=18)
+        plt.show()
+
+def resample_centerline(x,y,z,deltas):
+    dx, dy, dz, ds, s = compute_derivatives(x,y,z) # compute derivatives
+    # resample centerline so that 'deltas' is roughly constant
+    # [parametric spline representation of curve; note that there is *no* smoothing]
+    tck, u = scipy.interpolate.splprep([x,y,z],s=0)
+    unew = np.linspace(0,1,1+int(round(s[-1]/deltas))) # vector for resampling
+    out = scipy.interpolate.splev(unew,tck) # resampling
+    x, y, z = out[0], out[1], out[2] # assign new coordinate values
+    dx, dy, dz, ds, s = compute_derivatives(x,y,z) # recompute derivatives
+    return x,y,z,dx,dy,dz,ds,s
+
+def migrate_one_step(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma):  #PM MADE SINUOSITY AN OUTPUT TOO
+    ns=len(x)
+    curv = compute_curvature(x,y)
+    dx, dy, dz, ds, s = compute_derivatives(x,y,z)
+    sinuosity = s[-1]/(x[-1]-x[0])
+    curv = W*curv # dimensionless curvature
+    R0 = kl*curv # simple linear relationship between curvature and nominal migration rate
+    alpha = k*2*Cf/D # exponent for convolution function G
+    R1 = compute_migration_rate(pad,ns,ds,alpha,omega,gamma,R0)
+    R1 = sinuosity**(-2/3.0)*R1
+    # calculate new centerline coordinates:
+    dy_ds = dy[pad1:ns-pad+1]/ds[pad1:ns-pad+1]
+    dx_ds = dx[pad1:ns-pad+1]/ds[pad1:ns-pad+1]
+    # adjust x and y coordinates (this *is* the migration):
+    x[pad1:ns-pad+1] = x[pad1:ns-pad+1] + R1[pad1:ns-pad+1]*dy_ds*dt
+    y[pad1:ns-pad+1] = y[pad1:ns-pad+1] - R1[pad1:ns-pad+1]*dx_ds*dt
+    return x,y #,sinuosity
+
+def migrate_one_step_w_bias(x,y,z,W,kl,dt,k,Cf,D,pad,pad1,omega,gamma):
+    ns=len(x)
+    curv = compute_curvature(x,y)
+    dx, dy, dz, ds, s = compute_derivatives(x,y,z)
+    sinuosity = s[-1]/(x[-1]-x[0])
+    curv = W*curv # dimensionless curvature
+    R0 = kl*curv # simple linear relationship between curvature and nominal migration rate
+    alpha = k*2*Cf/D # exponent for convolution function G
+    R1 = compute_migration_rate(pad,ns,ds,alpha,omega,gamma,R0)
+    R1 = sinuosity**(-2/3.0)*R1
+    pad = -1
+    # calculate new centerline coordinates:
+    dy_ds = dy[pad1:ns-pad+1]/ds[pad1:ns-pad+1]
+    dx_ds = dx[pad1:ns-pad+1]/ds[pad1:ns-pad+1]
+    tilt_factor = 0.2
+    T = kl*tilt_factor*np.ones(np.shape(x))
+    angle = 90.0
+    # adjust x and y coordinates (this *is* the migration):
+    x[pad1:ns-pad+1] = x[pad1:ns-pad+1] + R1[pad1:ns-pad+1] * dy_ds * dt + T[pad1:ns-pad+1] * dy_ds * dt * (np.sin(np.deg2rad(angle)) * dx_ds + np.cos(np.deg2rad(angle)) * dy_ds)
+    y[pad1:ns-pad+1] = y[pad1:ns-pad+1] - R1[pad1:ns-pad+1] * dx_ds * dt - T[pad1:ns-pad+1] * dx_ds * dt * (np.sin(np.deg2rad(angle)) * dx_ds + np.cos(np.deg2rad(angle)) * dy_ds)
+    return x,y
+
+def generate_initial_channel(W,D,Sl,deltas,pad,n_bends):
+    """generate straight Channel object with some noise added that can serve
+    as input for initializing a ChannelBelt object
+    W - channel width
+    D - channel depth
+    Sl - channel gradient
+    deltas - distance between nodes on centerline
+    pad - padding (number of nodepoints along centerline)
+    n_bends - approximate number of bends to be simulated"""
+    
+    sinuosity=[]
+    
+    noisy_len = n_bends*10*W/2.0 # length of noisy part of initial centerline
+    pad1 = int(pad/10.0) # padding at upstream end can be shorter than padding on downstream end
+    if pad1<5:
+        pad1 = 5
+    x = np.linspace(0, noisy_len+(pad+pad1)*deltas, int(noisy_len/deltas+pad+pad1)+1) # x coordinate
+    y = 10.0 * (2*np.random.random_sample(int(noisy_len/deltas)+1,)-1)
+    y = np.hstack((np.zeros((pad1),),y,np.zeros((pad),))) # y coordinate
+    deltaz = Sl * deltas*(len(x)-1)
+    z = np.linspace(0,deltaz,len(x))[::-1] # z coordinate
+    
+    dx, dy, dz, ds, s = compute_derivatives(x,y,z)
+    initial_sinuosity = s[-1]/(x[-1]-x[0])
+    
+    sinuosity.append(initial_sinuosity)
+    
+    return Channel(x,y,z,W,D), sinuosity
+
+
+def reset_channel(W,D,Sl,deltas,pad,n_bends):
+
+    sinuosity=[]
+    
+    noisy_len = n_bends*10*W/2.0 # length of noisy part of initial centerline
+    pad1 = int(pad/10.0) # padding at upstream end can be shorter than padding on downstream end
+    if pad1<5:
+        pad1 = 5
+    x = np.linspace(0, noisy_len+(pad+pad1)*deltas, int(noisy_len/deltas+pad+pad1)+1) # x coordinate
+    y = 10.0 * (2*np.random.random_sample(int(noisy_len/deltas)+1,)-1)
+    y = np.hstack((np.zeros((pad1),),y,np.zeros((pad),))) # y coordinate
+
+    deltaz = Sl * deltas*(len(x)-1)
+    z = np.linspace(0,deltaz,len(x))[::-1] # z coordinate
+    
+    dx, dy, dz, ds, s = compute_derivatives(x,y,z)
+
+    print(sinuosity)
+    
+    #initial_sinuosity = s[-1]/(x[-1]-x[0])
+    
+    #sinuosity.append(initial_sinuosity)
+    
+    return x,y,z  #Random stacking change - added z
+
+
+
+@numba.jit(nopython=True) # use Numba to speed up the heaviest computation
+def compute_migration_rate(pad,ns,ds,alpha,omega,gamma,R0):
+    """compute migration rate as weighted sum of upstream curvatures
+    pad - padding (number of nodepoints along centerline)
+    ns - number of points in centerline
+    ds - distances between points in centerline
+    omega - constant in HK model
+    gamma - constant in HK model
+    R0 - nominal migration rate (dimensionless curvature * migration rate constant)"""
+    R1 = np.zeros(ns) # preallocate adjusted channel migration rate
+    pad1 = int(pad/10.0) # padding at upstream end can be shorter than padding on downstream end
+    if pad1<5:
+        pad1 = 5
+    for i in range(pad1,ns-pad):
+        si2 = np.hstack((np.array([0]),np.cumsum(ds[i-1::-1])))  # distance along centerline, backwards from current point
+        G = np.exp(-alpha*si2) # convolution vector
+        R1[i] = omega*R0[i] + gamma*np.sum(R0[i::-1]*G)/np.sum(G) # main equation
+    return R1
+
+def compute_derivatives(x,y,z):
+    """function for computing first derivatives of a curve (centerline)
+    x,y are cartesian coodinates of the curve
+    outputs:
+    dx - first derivative of x coordinate
+    dy - first derivative of y coordinate
+    ds - distances between consecutive points along the curve
+    s - cumulative distance along the curve"""
+    dx = np.gradient(x) # first derivatives
+    dy = np.gradient(y)
+    #pdb.set_trace()
+    dz = np.gradient(z)
+    ds = np.sqrt(dx**2+dy**2+dz**2)
+    s = np.hstack((0,np.cumsum(ds[1:])))
+    return dx, dy, dz, ds, s
+
+def compute_curvature(x,y):
+    """function for computing first derivatives and curvature of a curve (centerline)
+    x,y are cartesian coodinates of the curve
+    outputs:
+    dx - first derivative of x coordinate
+    dy - first derivative of y coordinate
+    ds - distances between consecutive points along the curve
+    s - cumulative distance along the curve
+    curvature - curvature of the curve (in 1/units of x and y)"""
+    dx = np.gradient(x) # first derivatives
+    dy = np.gradient(y)
+    ddx = np.gradient(dx) # second derivatives
+    ddy = np.gradient(dy)
+    curvature = (dx*ddy-dy*ddx)/((dx**2+dy**2)**1.5)
+    return curvature
+
+def make_colormap(seq):
+    """Return a LinearSegmentedColormap
+    seq: a sequence of floats and RGB-tuples. The floats should be increasing
+    and in the interval (0,1).
+    [from: https://stackoverflow.com/questions/16834861/create-own-colormap-using-matplotlib-and-plot-color-scale]
+    """
+    seq = [(None,) * 3, 0.0] + list(seq) + [1.0, (None,) * 3]
+    cdict = {'red': [], 'green': [], 'blue': []}
+    for i, item in enumerate(seq):
+        if isinstance(item, float):
+            r1, g1, b1 = seq[i - 1]
+            r2, g2, b2 = seq[i + 1]
+            cdict['red'].append([item, r1, r2])
+            cdict['green'].append([item, g1, g2])
+            cdict['blue'].append([item, b1, b2])
+    return mcolors.LinearSegmentedColormap('CustomMap', cdict)
+
+def kth_diag_indices(a,k):
+    """function for finding diagonal indices with k offset
+    [from https://stackoverflow.com/questions/10925671/numpy-k-th-diagonal-indices]"""
+    rows, cols = np.diag_indices_from(a)
+    if k<0:
+        return rows[:k], cols[-k:]
+    elif k>0:
+        return rows[k:], cols[:-k]
+    else:
+        return rows, cols
+
+def find_cutoffs(x,y,crdist,deltas):
+    """function for identifying locations of cutoffs along a centerline
+    and the indices of the segments that will become part of the oxbows
+    x,y - coordinates of centerline
+    crdist - critical cutoff distance
+    deltas - distance between neighboring points along the centerline"""
+    diag_blank_width = int((crdist+20*deltas)/deltas)
+    # distance matrix for centerline points:
+    dist = distance.cdist(np.array([x,y]).T,np.array([x,y]).T)
+    dist[dist>crdist] = np.NaN # set all values that are larger than the cutoff threshold to NaN
+    # set matrix to NaN along the diagonal zone:
+    for k in range(-diag_blank_width,diag_blank_width+1):
+        rows, cols = kth_diag_indices(dist,k)
+        dist[rows,cols] = np.NaN
+    i1, i2 = np.where(~np.isnan(dist))
+    ind1 = i1[np.where(i1<i2)[0]] # get rid of unnecessary indices
+    ind2 = i2[np.where(i1<i2)[0]] # get rid of unnecessary indices
+    return ind1, ind2 # return indices of cutoff points and cutoff coordinates
+
+def cut_off_cutoffs(x,y,z,s,crdist,deltas):
+    """function for executing cutoffs - removing oxbows from centerline and storing cutoff coordinates
+    x,y - coordinates of centerline
+    crdist - critical cutoff distance
+    deltas - distance between neighboring points along the centerline
+    outputs:
+    x,y,z - updated coordinates of centerline
+    xc, yc, zc - lists with coordinates of cutoff segments"""
+    xc = []
+    yc = []
+    zc = []
+    ind1, ind2 = find_cutoffs(x,y,crdist,deltas) # initial check for cutoffs
+    while len(ind1)>0:
+        xc.append(x[ind1[0]:ind2[0]+1]) # x coordinates of cutoff
+        yc.append(y[ind1[0]:ind2[0]+1]) # y coordinates of cutoff
+        zc.append(z[ind1[0]:ind2[0]+1]) # z coordinates of cutoff
+        x = np.hstack((x[:ind1[0]+1],x[ind2[0]:])) # x coordinates after cutoff
+        y = np.hstack((y[:ind1[0]+1],y[ind2[0]:])) # y coordinates after cutoff
+        z = np.hstack((z[:ind1[0]+1],z[ind2[0]:])) # z coordinates after cutoff
+        ind1, ind2 = find_cutoffs(x,y,crdist,deltas)
+    return x,y,z,xc,yc,zc
+
+def get_channel_banks(x,y,W):
+    """function for finding coordinates of channel banks, given a centerline and a channel width
+    x,y - coordinates of centerline
+    W - channel width
+    outputs:
+    xm, ym - coordinates of channel banks (both left and right banks)"""
+    x1 = x.copy()
+    y1 = y.copy()
+    x2 = x.copy()
+    y2 = y.copy()
+    ns = len(x)
+    dx = np.diff(x); dy = np.diff(y)
+    ds = np.sqrt(dx**2+dy**2)
+    x1[:-1] = x[:-1] + 0.5*W*np.diff(y)/ds
+    y1[:-1] = y[:-1] - 0.5*W*np.diff(x)/ds
+    x2[:-1] = x[:-1] - 0.5*W*np.diff(y)/ds
+    y2[:-1] = y[:-1] + 0.5*W*np.diff(x)/ds
+    x1[ns-1] = x[ns-1] + 0.5*W*(y[ns-1]-y[ns-2])/ds[ns-2]
+    y1[ns-1] = y[ns-1] - 0.5*W*(x[ns-1]-x[ns-2])/ds[ns-2]
+    x2[ns-1] = x[ns-1] - 0.5*W*(y[ns-1]-y[ns-2])/ds[ns-2]
+    y2[ns-1] = y[ns-1] + 0.5*W*(x[ns-1]-x[ns-2])/ds[ns-2]
+    xm = np.hstack((x1,x2[::-1]))
+    ym = np.hstack((y1,y2[::-1]))
+    return xm, ym
+
+def dist_map(x,y,z,xmin,xmax,ymin,ymax,dx,delta_s):
+    """function for centerline rasterization and distance map calculation
+    inputs:
+    x,y,z - coordinates of centerline
+    xmin, xmax, ymin, ymax - x and y coordinates that define the area of interest
+    dx - gridcell size (m)
+    delta_s - distance between points along centerline (m)
+    returns:
+    cl_dist - distance map (distance from centerline)
+    x_pix, y_pix, z_pix - x,y, and z pixel coordinates of the centerline
+    s_pix - along-channel distance in pixels
+    z_map - map of reference channel thalweg elevation (elevation of closest point along centerline)
+    x, y, z - x,y,z centerline coordinates clipped to the 3D model domain"""
+    y = y[(x>xmin) & (x<xmax)]
+    z = z[(x>xmin) & (x<xmax)]
+    x = x[(x>xmin) & (x<xmax)]
+    dummy,dy,dz,ds,s = compute_derivatives(x,y,z)
+    if len(np.where(ds>2*delta_s)[0])>0:
+        inds = np.where(ds>2*delta_s)[0]
+        inds = np.hstack((0,inds,len(x)))
+        lengths = np.diff(inds)
+        long_segment = np.where(lengths==max(lengths))[0][0]
+        start_ind = inds[long_segment]+1
+        end_ind = inds[long_segment+1]
+        if end_ind<len(x):
+            x = x[start_ind:end_ind]
+            y = y[start_ind:end_ind]
+            z = z[start_ind:end_ind]
+        else:
+            x = x[start_ind:]
+            y = y[start_ind:]
+            z = z[start_ind:]
+    xdist = xmax - xmin
+    ydist = ymax - ymin
+    iwidth = int((xmax-xmin)/dx)
+    iheight = int((ymax-ymin)/dx)
+    xratio = iwidth/xdist
+    # create list with pixel coordinates:
+    pixels = []
+    for i in range(0,len(x)):
+        px = int(iwidth - (xmax - x[i]) * xratio)
+        py = int(iheight - (ymax - y[i]) * xratio)
+        pixels.append((px,py))
+    # create image and numpy array:
+    img = Image.new("RGB", (iwidth, iheight), "white")
+    draw = ImageDraw.Draw(img)
+    draw.line(pixels, fill="rgb(0, 0, 0)") # draw centerline as black line
+    pix = np.array(img)
+    cl = pix[:,:,0]
+    cl[cl==255] = 1 # set background to 1 (centerline is 0)
+    y_pix,x_pix = np.where(cl==0)
+    x_pix,y_pix = order_cl_pixels(x_pix,y_pix)
+    # This next block of code is kind of a hack. Looking for, and eliminating, 'bad' pixels.
+    img = np.array(img)
+    img = img[:,:,0]
+    img[img==255] = 1
+    img1 = morphology.binary_dilation(img, morphology.square(2)).astype(np.uint8)
+    if len(np.where(img1==0)[0])>0:
+        x_pix, y_pix = eliminate_bad_pixels(img,img1)
+        x_pix,y_pix = order_cl_pixels(x_pix,y_pix)
+    img1 = morphology.binary_dilation(img, np.array([[1,0,1],[1,1,1]],dtype=np.uint8)).astype(np.uint8)
+    if len(np.where(img1==0)[0])>0:
+        x_pix, y_pix = eliminate_bad_pixels(img,img1)
+        x_pix,y_pix = order_cl_pixels(x_pix,y_pix)
+    img1 = morphology.binary_dilation(img, np.array([[1,0,1],[0,1,0],[1,0,1]],dtype=np.uint8)).astype(np.uint8)
+    if len(np.where(img1==0)[0])>0:
+        x_pix, y_pix = eliminate_bad_pixels(img,img1)
+        x_pix,y_pix = order_cl_pixels(x_pix,y_pix)
+    #redo the distance calculation (because x_pix and y_pix do not always contain all the points in cl):
+    cl[cl==0] = 1
+    cl[y_pix,x_pix] = 0
+    cl_dist, inds = ndimage.distance_transform_edt(cl, return_indices=True)
+    dx,dy,dz,ds,s = compute_derivatives(x,y,z)
+    dx_pix = np.diff(x_pix)
+    dy_pix = np.diff(y_pix)
+    ds_pix = np.sqrt(dx_pix**2+dy_pix**2)
+    s_pix = np.hstack((0,np.cumsum(ds_pix)))
+    f = scipy.interpolate.interp1d(s,z)
+    snew = s_pix*s[-1]/s_pix[-1]
+    if snew[-1]>s[-1]:
+        snew[-1]=s[-1]
+    snew[snew<s[0]]=s[0]
+    z_pix = f(snew)
+    # create z_map:
+    z_map = np.zeros(np.shape(cl_dist))
+    z_map[y_pix,x_pix]=z_pix
+    xinds=inds[1,:,:]
+    yinds=inds[0,:,:]
+    for i in range(0,len(x_pix)):
+        z_map[(xinds==x_pix[i]) & (yinds==y_pix[i])] = z_pix[i]
+    return cl_dist, x_pix, y_pix, z_pix, s_pix, z_map, x, y, z, xinds, yinds
+
+def erosion_surface(h,w,cl_dist,z):
+    """function for creating a parabolic erosional surface
+    inputs:
+    h - geomorphic channel depth (m)
+    w - geomorphic channel width (in pixels, as cl_dist is also given in pixels)
+    cl_dist - distance map (distance from centerline)
+    z - reference elevation (m)
+    returns:
+    surf - map of the quadratic erosional surface (m)
+    """
+    surf = z + (4*h/w**2)*(cl_dist+w*0.5)*(cl_dist-w*0.5)
+    return surf
+
+def Random_Stacking_Fill(surf,bth,dcr,z,h,w,cl_dist):
+    '''Take the erosive surface and add channel fill'''
+
+    surf = z + (4*h/w**2)*(cl_dist+w*0.5)*(cl_dist-w*0.5)
+
+    #pdb.set_trace()
+    min=np.min(surf)
+
+
+    fill_height=min+bth
+
+    #np.where(surf>fill_height)]=fill_height
+
+    np.where(surf<fill_height,fill_height,surf)
+
+
+    #relief = abs(relief-np.amin(relief))
+    #th = bth * (1 - relief/dcr) # bed thickness inversely related to relief
+    #th[th<0] = 0.0 # set negative th values to zero
+    return surf
+
+
+
+
+def point_bar_surface(cl_dist,z,h,w):
+    """function for creating a Gaussian-based point bar surface
+    used in 3D fluvial model
+    inputs:
+    cl_dist - distance map (distance from centerline)
+    z - reference elevation (m)
+    h - channel depth (m)
+    w - channel width, in pixels, as cl_dist is also given in pixels
+    returns:
+    pb - map of the Gaussian surface that can be used to from a point bar deposit (m)"""
+    pb = z-h*np.exp(-(cl_dist**2)/(2*(w*0.33)**2))
+    return pb
+
+def sand_surface(surf,bth,dcr,z_map,h):
+    """function for creating the top horizontal surface sand-rich deposit in the bottom of the channel
+    used in 3D submarine channel models
+    inputs:
+    surf - current geomorphic surface
+    bth - thickness of sand deposit in axis of channel (m)
+    dcr - critical channel depth, above which there is no sand deposition (m)
+    z_map - map of reference channel thalweg elevation (elevation of closest point along centerline)
+    h - channel depth (m)
+    returns:
+    th - thickness map of sand deposit (m)
+    relief - map of channel relief (m)"""
+    relief = abs(surf-z_map+h)
+    relief = abs(relief-np.amin(relief))
+    th = bth * (1 - relief/dcr) # bed thickness inversely related to relief
+    th[th<0] = 0.0 # set negative th values to zero
+    return th, relief
+
+#def mud_surface(h_mud,levee_width,cl_dist,w,z_map,topo):
+def mud_surface(h_mud,levee_width,cl_dist,w):
+    """function for creating a map of overbank deposit thickness
+    inputs:
+    h_mud - maximum thickness of overbank deposit (m)
+    levee_width - half-width of overbank deposit (m)
+    cl_dist - distance map (distance from centerline)
+    w - channel width (in pixels, as cl_dist is also given in pixels)
+    z_map - map of reference channel thalweg elevation (elevation of closest point along centerline)
+    topo - current geomorphic surface
+    returns:
+    surf - map of overbank deposit thickness (m)"""
+    # create a surface that thins linearly away from the channel centerline:
+    surf1 = (-2*h_mud/levee_width)*cl_dist+h_mud;
+    surf2 = (2*h_mud/levee_width)*cl_dist+h_mud;
+    surf = np.minimum(surf1,surf2)
+    # surface for 'eroding' the central part of the mud layer:
+    surf3 = h_mud + (2.9*1.5*h_mud/w**2)*(cl_dist+w*0.5)*(cl_dist-w*0.5)
+    surf = np.minimum(surf,surf3)
+    surf[surf<0] = 0; # eliminate negative thicknesses
+    return surf
+
+def topostrat(topo):
+    """function for converting a stack of geomorphic surfaces into stratigraphic surfaces
+    inputs:
+    topo - 3D numpy array of geomorphic surfaces
+    returns:
+    strat - 3D numpy array of stratigraphic surfaces
+    """
+    r,c,ts = np.shape(topo)
+    strat = np.copy(topo)
+    for i in (range(0,ts)):
+        strat[:,:,i] = np.amin(topo[:,:,i:], axis=2)
+    return strat
+
+def cl_dist_map(x,y,z,xmin,xmax,ymin,ymax,dx):
+    """function for centerline rasterization and distance map calculation (does not return zmap)
+    used for cutoffs only
+    inputs:
+    x,y,z - coordinates of centerline
+    xmin, xmax, ymin, ymax - x and y coordinates that define the area of interest
+    dx - gridcell size (m)
+    returns:
+    cl_dist - distance map (distance from centerline)
+    x_pix, y_pix, - x and y pixel coordinates of the centerline
+    """
+    y = y[(x>xmin) & (x<xmax)]
+    z = z[(x>xmin) & (x<xmax)]
+    x = x[(x>xmin) & (x<xmax)]
+    xdist = xmax - xmin
+    ydist = ymax - ymin
+    iwidth = int((xmax-xmin)/dx)
+    iheight = int((ymax-ymin)/dx)
+    xratio = iwidth/xdist
+    # create list with pixel coordinates:
+    pixels = []
+    for i in range(0,len(x)):
+        px = int(iwidth - (xmax - x[i]) * xratio)
+        py = int(iheight - (ymax - y[i]) * xratio)
+        pixels.append((px,py))
+    # create image and numpy array:
+    img = Image.new("RGB", (iwidth, iheight), "white")
+    draw = ImageDraw.Draw(img)
+    draw.line(pixels, fill="rgb(0, 0, 0)") # draw centerline as black line
+    pix = np.array(img)
+    cl = pix[:,:,0]
+    cl[cl==255] = 1 # set background to 1 (centerline is 0)
+    # calculate Euclidean distance map:
+    cl_dist, inds = ndimage.distance_transform_edt(cl, return_indices=True)
+    y_pix,x_pix = np.where(cl==0)
+    return cl_dist, x_pix, y_pix
+
+def eliminate_bad_pixels(img,img1):
+    x_ind = np.where(img1==0)[1][0]
+    y_ind = np.where(img1==0)[0][0]
+    img[y_ind:y_ind+2,x_ind:x_ind+2] = np.ones(1,).astype(np.uint8)
+    all_labels = measure.label(img,background=1,connectivity=2)
+    cl=all_labels.copy()
+    cl[cl==2]=0
+    cl[cl>0]=1
+    y_pix,x_pix = np.where(cl==1)
+    return x_pix, y_pix
+
+def order_cl_pixels(x_pix,y_pix):
+    dist = distance.cdist(np.array([x_pix,y_pix]).T,np.array([x_pix,y_pix]).T)
+    dist[np.diag_indices_from(dist)]=100.0
+    ind = np.argmin(x_pix) # select starting point on left side of image
+    clinds = [ind]
+    count = 0
+    while count<len(x_pix):
+        t = dist[ind,:].copy()
+        if len(clinds)>2:
+            t[clinds[-2]]=t[clinds[-2]]+100.0
+            t[clinds[-3]]=t[clinds[-3]]+100.0
+        ind = np.argmin(t)
+        clinds.append(ind)
+        count=count+1
+    x_pix = x_pix[clinds]
+    y_pix = y_pix[clinds]
+    return x_pix,y_pix
+
+def plot_chb(chb, plot_type, pb_age, ob_age, end_time, n_channels, ax, cmap_name, water_color):
+        """plot ChannelBelt object
+        plot_type - can be either 'strat' (for stratigraphic plot) or 'morph' (for morphologic plot)
+        pb_age - age of point bars (in years) at which they get covered by vegetation
+        ob_age - age of oxbow lakes (in years) at which they get covered by vegetation
+        end_time - age of last channel to be plotted (in years)
+        ax -
+        cmap_name -
+        water_color - """
+        cot = np.array(chb.cutoff_times)
+        sclt = np.array(chb.cl_times)
+        if end_time>0:
+            cot = cot[cot<=end_time]
+            sclt = sclt[sclt<=end_time]
+        times = np.sort(np.hstack((cot,sclt)))
+        times = np.unique(times)
+        order = 0 # variable for ordering objects in plot
+        # set up min and max x and y coordinates of the plot:
+        xmin = np.min(chb.channels[0].x)
+        xmax = np.max(chb.channels[0].x)
+        ymax = 0
+        for i in range(len(chb.channels)):
+            ymax = max(ymax, np.max(np.abs(chb.channels[i].y)))
+        ymax = ymax+2*chb.channels[0].W # add a bit of space on top and bottom
+        ymin = -1*ymax
+        # size figure so that its size matches the size of the model:
+        # fig = plt.figure(figsize=(20,(ymax-ymin)*20/(xmax-xmin)))
+        if plot_type == 'morph':
+            pb_crit = len(times[times<times[-1]-pb_age])/float(len(times))
+            ob_crit = len(times[times<times[-1]-ob_age])/float(len(times))
+            green = (106/255.0,159/255.0,67/255.0) # vegetation color
+            pb_color = (189/255.0,153/255.0,148/255.0) # point bar color
+            ob_color = (15/255.0,58/255.0,65/255.0) # oxbow color
+            pb_cmap = make_colormap([green,green,pb_crit,green,pb_color,1.0,pb_color]) # colormap for point bars
+            ob_cmap = make_colormap([green,green,ob_crit,green,ob_color,1.0,ob_color]) # colormap for oxbows
+            ax.fill([xmin,xmax,xmax,xmin],[ymin,ymin,ymax,ymax],color=(106/255.0,159/255.0,67/255.0))
+        if plot_type == 'age':
+            age_cmap = cm.get_cmap(cmap_name,n_channels)
+        for i in range(0,len(times)):
+            if times[i] in sclt:
+                ind = np.where(sclt==times[i])[0][0]
+                x1 = chb.channels[ind].x
+                y1 = chb.channels[ind].y
+                W = chb.channels[ind].W
+                xm, ym = get_channel_banks(x1,y1,W)
+                if plot_type == 'morph':
+                    if times[i]>times[-1]-pb_age:
+                        ax.fill(xm,ym,facecolor=pb_cmap(i/float(len(times)-1)),edgecolor='k',linewidth=0.2)
+                    else:
+                        ax.fill(xm,ym,facecolor=pb_cmap(i/float(len(times)-1)))
+                if plot_type == 'strat':
+                    order += 1
+                    ax.fill(xm,ym,sns.xkcd_rgb["light tan"],edgecolor='k',linewidth=0.25,zorder=order)
+                if plot_type == 'age':
+                    order += 1
+                    ax.fill(xm,ym,facecolor=age_cmap(i/float(n_channels-1)),edgecolor='k',linewidth=0.1,zorder=order)
+            if times[i] in cot:
+                ind = np.where(cot==times[i])[0][0]
+                for j in range(0,len(chb.cutoffs[ind].x)):
+                    x1 = chb.cutoffs[ind].x[j]
+                    y1 = chb.cutoffs[ind].y[j]
+                    xm, ym = get_channel_banks(x1,y1,chb.cutoffs[ind].W)
+                    if plot_type == 'morph':
+                        ax.fill(xm,ym,color=ob_cmap(i/float(len(times)-1)))
+                    if plot_type == 'strat':
+                        order = order+1
+                        ax.fill(xm,ym,sns.xkcd_rgb["ocean blue"],edgecolor='k',linewidth=0.25,zorder=order)
+                    if plot_type == 'age':
+                        order += 1
+                        ax.fill(xm,ym,sns.xkcd_rgb[water_color],edgecolor='k',linewidth=0.1,zorder=order)
+        x1 = chb.channels[len(sclt)-1].x
+        y1 = chb.channels[len(sclt)-1].y
+        xm, ym = get_channel_banks(x1,y1,chb.channels[len(sclt)-1].W)
+        order = order+1
+        if plot_type == 'age':
+            ax.fill(xm,ym,color=sns.xkcd_rgb[water_color],zorder=order,edgecolor='k',linewidth=0.1)
+        else:
+            ax.fill(xm,ym,color=(16/255.0,73/255.0,90/255.0),zorder=order) #,edgecolor='k')
+        # plt.axis('equal')
+        # plt.xlim(xmin,xmax)
+        # plt.ylim(ymin,ymax)
+        # return fig
+
+def Compute_Trajectory(nit,saved_ts,timeinput,dzinput,bthc):
+
+        ##############################################################################
+    '''This functions purpose is to allow the channel form to follow a vertical trajectory through the Stratigraphy.
+      Output is it computes delta Z values which aggrades or incises the channel form a certain amount for every Howard & knutson iteration
+
+        To generate realistic deepwater channel belt stratigraphies with approx the right number of cut offs
+        Probably looking at around 1500 to 3500 iterations of the HK model (my opinion - dependent on lateral migration rate etc)
+
+        Therefore in this iteration range (1500-3500) we should be aiming for it to complete a trajectory
+
+        INPUTS:
+        nit - See run_HK_model_simple function
+
+
+        OUTPUTS:
+        dztrajectory: An Array that stores the amount of migration the channel form should undergo per HK iteration
+        to form the trajectory and given belt thickness of interest.'''
+        ##############################################################################
+
+
+    time=np.linspace(0,nit,nit)
+
+    dz_trajectory=np.interp(time,timeinput,dzinput)
+
+    plt.figure()
+    plt.scatter(time,dz_trajectory,s=0)
+    plt.plot(time,dz_trajectory)
+    plt.title('Change in Z per HK iteration')
+    plt.xlabel('HK iterations')
+    plt.ylabel('Change in Z per iteration (m)')
+
+
+    Z_trajectory=np.cumsum(dz_trajectory)
+
+    ChannelBeltThickness=np.around(max(Z_trajectory)-min(Z_trajectory),2)
+
+
+    plt.figure()
+    plt.scatter(time,Z_trajectory,s=0)
+    plt.plot(time,Z_trajectory)
+    plt.title('Trajectory, Belt Thickness = ' +str(ChannelBeltThickness) +' metres' )
+    plt.xlabel('HK iterations')
+    plt.ylabel('Z position (m)')
+
+
+    #CLZjump=[sum(dz_trajectory[current:current+saved_ts]) for current in range(0,np.size(dz_trajectory)-saved_ts,saved_ts)]
+
+    CLZjump=[sum(dz_trajectory[current:current+saved_ts]) for current in range(0,np.size(dz_trajectory)+saved_ts,saved_ts)]
+
+    CLZjump=np.asarray(CLZjump)
+
+    CLZjumpbthc=np.divide(CLZjump,bthc)
+
+
+  
+    return dz_trajectory, Z_trajectory, CLZjump,CLZjumpbthc
+
+def Compute_Variable_Trajectory(nit,saved_ts,time_input,dz_inputupdip,dz_inputdowndip,D,bthc):
+
+    ###############
+    '''This functions purpose is to compute two different trajectories applied ot the same model. One trajectory being defined far updip, the other far downdip.
+    The function applies a weighting procedure for nodes in between the updip and downdip trajectories '''
+    ###############
+
+    time=np.linspace(0,nit,nit)
+
+    dz_trajectoryupdip=np.interp(time,time_input,dz_inputupdip)
+
+    dz_trajectorydowndip=np.interp(time,time_input,dz_inputdowndip)
+
+    Ztrajectoryupdip=np.cumsum(dz_trajectoryupdip)
+
+    Ztrajectorydowndip=np.cumsum(dz_trajectorydowndip)
+
+    BeltThicknessUpdip=np.around(max(Ztrajectoryupdip)-min(Ztrajectoryupdip),2)
+
+    BeltThicknessDowndip=np.around(max(Ztrajectorydowndip)-min(Ztrajectorydowndip),2)
+
+    UpdipZjump=[sum(dz_trajectoryupdip[current:current+saved_ts]) for current in range(0,np.size(dz_trajectoryupdip),saved_ts)]
+
+    DowndipZjump=[sum(dz_trajectorydowndip[current:current+saved_ts]) for current in range(0,np.size(dz_trajectorydowndip),saved_ts)]
+
+    UpdipZjump=np.asarray(UpdipZjump)
+
+    DowndipZjump=np.asarray(DowndipZjump)
+
+    UpdipZjumpD=UpdipZjump/(bthc)
+
+    DowndipZjumpD=DowndipZjump/(bthc)
+
+    #PLOTTING VARIABLE TRAJECTORY
+
+    plt.figure()
+    plt.scatter(time,Ztrajectoryupdip,s=0)
+    plt.plot(time,Ztrajectoryupdip)
+    plt.title('Updip Trajectory, Belt Thickness = ' +str(BeltThicknessUpdip) +' metres' )
+    plt.xlabel('HK iterations')
+    plt.ylabel('Z position (m)')
+
+    plt.figure()
+    plt.scatter(time,Ztrajectorydowndip,s=0)
+    plt.plot(time,Ztrajectorydowndip)
+    plt.title('Downdip Trajectory, Belt Thickness = ' +str(BeltThicknessDowndip) +' metres' )
+    plt.xlabel('HK iterations')
+    plt.ylabel('Z position (m)')
+
+    plt.figure()
+    plt.scatter(np.linspace(0,nit,int(nit/saved_ts)),UpdipZjumpD)
+    plt.plot(np.linspace(0,nit,int(nit/saved_ts)),UpdipZjumpD)
+    plt.title('Updip Jump as Proportion of Filled Channel Depth')
+    plt.xlabel('HK iterations')
+    plt.ylabel('Updip Jump as proportion of Filled Channel Depth')
+
+
+    plt.figure()
+    plt.scatter(np.linspace(0,nit,int(nit/saved_ts)),DowndipZjumpD)
+    plt.plot(np.linspace(0,nit,int(nit/saved_ts)),DowndipZjumpD)
+    plt.title('Downdip Jump as Proportion of Filled Channel Depth')
+    plt.xlabel('HK iterations')
+    plt.ylabel('Downdip Jump as proportion of Filled Channel Depth')
+
+    plt.show()
+
+    return dz_trajectoryupdip,dz_trajectorydowndip,UpdipZjumpD,DowndipZjumpD
+
+def Slope_Change(X,Z,S):
+
+    ##########
+    #CHECK OVERALL SLOPE - mostly for when running Variable Trajectory
+    #########
+
+    OverallSlope_Start=(Z[0][0]-Z[0][-1])/(X[0][0]-X[0][-1])
+    ChannelSlope_Start=(Z[0][0]-Z[0][-1])/(S[0][0]-S[0][-1])
+
+    OverallSlope_End=(Z[-1][0]-Z[-1][-1])/(X[-1][0]-X[-1][-1])
+    ChannelSlope_End=(Z[-1][0]-Z[-1][-1])/(S[-1][0]-S[-1][-1])
+
+    OverallSlope_Start_Angle=np.arctan(OverallSlope_Start)*180/np.pi #np.arctan is in radians so need to convert to degrees
+    ChannelSlope_Start_Angle=np.arctan(ChannelSlope_Start)*180/np.pi
+
+    OverallSlope_End_Angle=np.arctan(OverallSlope_End)*180/np.pi
+    ChannelSlope_End_Angle=np.arctan(ChannelSlope_End)*180/np.pi
+
+    print(f"Overall Slope at Start is {OverallSlope_Start:.4f}, this is {OverallSlope_Start_Angle:.3f} degrees")
+    print(f"Overall Slope at End is {OverallSlope_End:.4f}, this is {OverallSlope_End_Angle:.3f} degrees")
+
+    print(f"Slope of Channel at Start is {ChannelSlope_Start:.4f}, this is {ChannelSlope_Start_Angle:.3f} degrees")
+    print(f"Slope of Channel at End is {ChannelSlope_End:.4f}, this is {ChannelSlope_End_Angle:.3f} degrees")
+
+    fig=plt.figure()
+    ax = fig.add_subplot(111)
+    cm = plt.get_cmap('magma')
+    
+    #pdb.set_trace()
+    #seismic_centerlines=range(0,len(X))
+    seismic_centerlines=[0,2,4,10,13,14,16,19,22,24,26,28,30]
+
+    #for i in range(0,len(S)): #These centerlines are original Seismic Interpretation
+    for i in seismic_centerlines:
+        ax.set_prop_cycle(color=[cm(1.*seismic_centerlines.index(i)/len(seismic_centerlines))])
+        plt.plot(S[i],Z[i])
+
+    plt.xlabel('Along Channel Distance (Increases with Increasing Sinuosity) (Meters)',fontsize=24,weight='bold')
+    plt.ylabel('Depth Below Sea level (Meters)',fontsize=24,weight='bold')
+    plt.tick_params(labelsize=18)
+
+    plt.show()
+
+    
+
+    CHANNEL_SLOPE,CHANNEL_SLOPE_ANGLE,OVERALL_SLOPE,OVERALLSLOPE_ANGLE,AVERAGE_ELEVATION=[],[],[],[],[]
+   
+    for i in seismic_centerlines:
+        #pdb.set_trace()
+        ChannelSlope=(Z[i][0]-Z[i][-1])/((S[i][0]-S[i][-1])*-1)
+        ChannelSlope_Angle=np.arctan(ChannelSlope)*180/np.pi
+
+        CHANNEL_SLOPE.append(ChannelSlope)
+
+        CHANNEL_SLOPE_ANGLE.append(ChannelSlope_Angle)
+
+        OverallSlope=(Z[i][0]-Z[i][-1])/(X[i][0]-X[i][-1])
+
+        OverallSlope_Angle=np.arctan(OverallSlope)*180/np.pi
+
+        OVERALL_SLOPE.append(OverallSlope)
+
+        OVERALLSLOPE_ANGLE.append(OverallSlope_Angle)
+
+        Average_Elevation=np.mean(Z[i])
+
+        AVERAGE_ELEVATION.append(Average_Elevation)
+
+    plt.figure()
+
+    plt.plot(AVERAGE_ELEVATION,CHANNEL_SLOPE_ANGLE)
+
+    plt.xlabel('Average Depth of Channel Below Sea Level (Reducing Depth is Increasing Channel Maturity)',fontsize=24,weight='bold')
+
+    plt.ylabel('Slope Angle of Channel - (Degrees)', fontsize=24, weight='bold')
+
+    plt.tick_params(labelsize=18)
+
+    plt.show()
+
+
+    return  OVERALL_SLOPE,OVERALLSLOPE_ANGLE,CHANNEL_SLOPE,CHANNEL_SLOPE_ANGLE
+
+def Plot_Sinuosity(Sinuosity,Z,number):#CLZjump
+
+    ##########
+    #Plots how sinuosity of channel changes in time (iterations of hk)
+    #########
+    #pdb.set_trace()
+
+    #Z in DEPTJ
+
+    fig = plt.figure()
+    ax=fig.add_subplot(111)
+    ax2 =ax.twinx()
+    
+    AVGZ=[]
+    Sinuosity_List=[]
+
+    if number=='horizons':
+
+        Horizon_List=[0,2,4,10,13,14,16,18,22,24,26,28,30]
+ 
+
+        for i in Horizon_List:
+            #plt.plot(centerlines_data[i][:,0],centerlines_data[i][:,1],'o')
+             AvgZ=np.mean(Z[i])
+
+             AVGZ.append(AvgZ)
+
+             Sinuosity_List.append(Sinuosity[i])
+
+    else:
+        Sinuosity_List=Sinuosity
+        for i in range(0,len(Z)):
+
+            AvgZ=np.mean(Z[i])
+
+            AVGZ.append(AvgZ)
+
+    Aggradation=np.diff(AVGZ)
+    Cumulative_Aggradation=np.cumsum(Aggradation)
+    Sinuosity_Line=ax.plot(Sinuosity_List, 'r-', label='Sinuosity')
+    Aggradation_Line=ax2.plot(Cumulative_Aggradation, 'b--',label=' Aggradation')
+    ax.set_ylabel("Sinuosity", fontsize=24,weight='bold')
+    ax.tick_params(labelsize=18)
+    ax2.set_ylabel("Mean Aggradation (m)",fontsize=24,weight='bold')
+    ax2.tick_params(labelsize=18)
+    ax.set_xlabel("Increasing Maturity (Centerline Number)", fontsize=24, weight='bold') #hk number
+    plt.title('Sinuosity Variation By Centerline',fontsize=24, weight='bold')
+    ax.set_ylim(bottom=1.0)
+
+    lns=Sinuosity_Line+Aggradation_Line
+    labs = [l.get_label() for l in lns]
+    ax.legend(lns, labs, loc=0, fontsize=18)
+    plt.show()
+
+def Plot_Grad_Sinuosity(saved_cl_times,Sinuosity,Z):
+
+    ##########
+    #Plots how sinuosity of channel changes in time (iterations of hk)
+    #########
+    #pdb.set_trace()
+    #Z=[i[0] for i in Z]
+    Grad_Sinuosity=np.diff(Sinuosity)
+    Grad_Aggradation=np.diff(Z)
+    Grad_Sinuosity_PerMetre=Grad_Sinuosity/Grad_Aggradation
+    #pdb.set_trace()
+    #Line_0=np.zeros(len(Grad_Sinuosity))
+    plt.figure()
+    plt.plot(Z[1:],Grad_Sinuosity_PerMetre, 'r-')
+    #plt.plot(Line_0,'b-')
+    plt.ylabel("Delta_Sinuosity (First Derivative) Per Meter Aggradation", fontsize=24,weight='bold')
+    plt.xlabel("Cumulative Channel Belt Aggradation (m)", fontsize=24, weight='bold') #hk number
+    plt.tick_params(labelsize=18)
+    plt.title('Rate of Change in Sinuosity Through Channel Belt Evolution',fontsize=24, weight='bold')
+    #plt.ylim(bottom=1.0)
+    plt.show()
+
+def atoi(text):
+    return int(text) if text.isdigit() else text
+
+def natural_keys(text):
+    '''
+    alist.sort(key=natural_keys) sorts in human order
+    http://nedbatchelder.com/blog/200712/human_sorting.html
+    (See Toothy's implementation in the comments)
+    '''
+    return [ atoi(c) for c in re.split(r'(\d+)', text) ]
+
+def ImportandSmooth_Centerlines_Petrel(deltas):
+
+    centerlines_data=[]
+
+    centerline_files=os.listdir(os.getcwd())
+    centerline_files.sort(key=natural_keys)
+    centerline_files = [x for x in  centerline_files if ".txt" in x]
+
+    for centerlines in centerline_files:
+        with open(centerlines,'r+') as centline:
+        #file_to_open=path+"Copy of CL 0m.txt"
+
+    #txtfile = open(file_to_open, "r")
+                data= np.genfromtxt(centline, delimiter='',skip_header=3)
+##############
+#Assign relevant z values to each centerline
+##############
+                #pdb.set_trace()
+                #centerlines=str(centerlines)
+
+
+                m=re.search(".txt",centerlines)
+                centerlines=centerlines[:m.start()]
+                #z_data=int(filter(str.isdigit, centerlines))
+                z_data=float(re.sub('[^0-9,.]','',centerlines)) #findoutzvalueofcenterlinefromfilename
+
+                #z_data=z_data #becausethefirstcenterlineisnotatseafloor
+
+                data[:,2]=z_data
+
+                centerlines_data.append(data)
+
+
+
+
+        CLZjump=[]
+        #pdb.set_trace()
+        for i in range(0,len(centerlines_data)-1):
+
+            clzjump=centerlines_data[i+1][0,2]-centerlines_data[i][0,2]
+            CLZjump.append(clzjump)
+
+        #pdb.set_trace()
+            CLZjump=np.asarray(CLZjump)
+
+            CLZjump=np.insert(CLZjump,0,0) #very first centerline say has a CLZjump of 0 for adding mud purposes during surface construction
+
+            ##############
+            #Smooth Centerlines
+            ##############
+
+
+            X,Y,Z,S,Sinuosity,DX,DY,DS=[],[],[],[],[],[],[],[]
+
+            for i in range(0,len(centerlines_data)):
+
+
+            #    centerline_smoothed=scipy.interpolate.CubicSpline(centerlines_data[i][:,0],centerlines_data[i][:,1])
+                x=centerlines_data[i][:,0]
+                y=centerlines_data[i][:,1]
+                z=centerlines_data[i][:,2]
+            #   centerlines_smoothed_data.append(centerline_smoothed)
+
+                dx, dy, ds, s = compute_derivatives(x,y)
+                # resample centerline so that 'deltas' is roughly constant:
+                tck, u = scipy.interpolate.splprep([x,y,z],s=len(dx)*2)
+                unew = np.linspace(0,1,1+s[-1]/deltas) # vector for resampling
+                out = scipy.interpolate.splev(unew,tck) # resampling
+                x, y, z = out[0], out[1], out[2]
+                sinuosity=np.sum(ds)/np.sum(dx)
+
+                DX.append(dx)
+                DS.append(ds)
+                DY.append(dy)
+                X.append(x)
+                Y.append(y)
+                Z.append(z)
+                S.append(s)
+                Sinuosity.append(sinuosity)
+
+    return X,Y,Z,S,Sinuosity,CLZjump,DX,DY,DS
+
+def ImportandSmooth_Centerlines_Paradigm(deltas,theta):
+
+    X,Y,Z,centerlines_data,DX,DY,DS,S,Sinuosity,Zmean,CLZjump,Slopes=[],[],[],[],[],[],[],[],[],[],[],[]
+
+    #pdb.set_trace()
+
+    centerline_files=os.listdir(os.getcwd())
+    centerline_files.sort(key=natural_keys)
+    centerline_files = [x for x in  centerline_files if ".txt" in x]  #gets rid of none .txt files
+
+
+    for centerlines in centerline_files:
+        with open(centerlines,'r+') as centline:
+            #pdb.set_trace()
+            data= np.loadtxt(centline,comments='!', delimiter=',')  #LOADS IN NOTEPAD FILES EXPORTED FROM OPENWORKS
+
+            centerlines_data.append(data)
+
+
+
+    for i in range(0,len(centerlines_data)):
+
+
+        #    centerline_smoothed=scipy.interpolate.CubicSpline(centerlines_data[i][:,0],centerlines_data[i][:,1])
+        x=centerlines_data[i][:,0]
+        y=centerlines_data[i][:,1]
+        z=centerlines_data[i][:,2]
+
+        #ROTATE CENTERLINES SO THEY ARE ALONG AXIS RATHER THAN AT 35 Degree ANGLE###
+        x,y=Rotate_Centerlines(x,y,theta)
+
+        dx, dy, dz, ds, s = compute_derivatives(x,y,z)
+
+        #slope = np.gradient(z)/ds
+        slope = dz/ds
+        # resample centerline so that 'deltas' is roughly constant:
+        tck, u = scipy.interpolate.splprep([x,y,z],s=50000)   #len(dx)*2)
+        unew = np.linspace(0,1,1+s[-1]/deltas) # vector for resampling
+        out = scipy.interpolate.splev(unew,tck) # resampling
+        x, y, z = out[0], out[1], out[2]
+        sinuosity=np.sum(ds)/np.sum(dx)
+
+
+        DX.append(dx)
+        DS.append(ds)
+        DY.append(dy)
+        X.append(x)
+        Y.append(y)
+        Z.append(z)
+        S.append(s)
+        Sinuosity.append(sinuosity)
+        Slopes.append(slope)
+
+
+    ##MEAN ELEVATION OF EACH CENTERLINE - Like earlier Nov 2019 Aanalysis
+
+    Zmean=list(range(0,len(Z)))
+
+    CLZjump=list(range(0,len(Z)))
+
+    for i in range(0,len(Z)):
+
+        Zmean[i]=np.mean(Z[i])
+
+
+    for j in range(0,len(Z)):
+
+        if j==0:
+
+            CLZjump[j]=0
+
+        else:
+
+            CLZjump[j]=-1*(Zmean[j]-Zmean[j-1]) #Zmean is in DEPTH
+
+
+
+    Aggradation=np.cumsum(CLZjump)
+
+    ###SCATTERPLOT OF CENTERLINES 3D)
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    #ax = fig.add_subplot(111)
+    #ax.set_zlim(-3200,-2900)
+
+    for i in range(0,len(X)):
+        ax.scatter(X[i],Y[i],-Z[i])
+        #ax.invert_zaxis()
+
+    #ax.legend()
+
+    return X,Y,Z,S,DX,DY,DS,Sinuosity,Zmean,CLZjump,Aggradation,Slopes
+
+def Sinuosity_Moving_Average(ds, w):
+    return np.convolve(ds, np.ones(w), 'valid') / w
+
+def ImportandSmooth_CutOffs(deltas,theta):
+
+    #pdb.set_trace()
+    cutoffs_data=[]
+
+    cutoff_files=os.listdir(os.getcwd())
+    cutoff_files.sort(key=natural_keys)
+    cutoff_files = [x for x in  cutoff_files if ".txt" in x]
+
+    for cutoffs in cutoff_files:
+        with open(cutoffs,'r+') as cutoff:
+
+            data= np.genfromtxt(cutoff, comments='!',delimiter=',')
+
+
+        cutoffs_data.append(data)
+
+##############
+ #Smooth CUTOFFS
+##############
+    XC,YC,ZC=[],[],[]
+
+    for i in range(0,len(cutoffs_data)):
+
+
+    #    centerline_smoothed=scipy.interpolate.CubicSpline(centerlines_data[i][:,0],centerlines_data[i][:,1])
+        xc=cutoffs_data[i][:,0]
+        yc=cutoffs_data[i][:,1]
+        zc=cutoffs_data[i][:,2]
+
+
+        xc,yc=Rotate_Centerlines(xc,yc,theta) #theta=35 gets classic strike orientated belt for
+
+        dx, dy,dz, ds, s = compute_derivatives(xc,yc,zc)
+        # resample centerline so that 'deltas' is roughly constant:
+        tck, u = scipy.interpolate.splprep([xc,yc,zc],s=50000)
+        unew = np.linspace(0,1,1+s[-1]/deltas) # vector for resampling
+        out = scipy.interpolate.splev(unew,tck) # resampling
+        xc, yc, zc = out[0], out[1], out[2]
+
+        XC.append(xc)
+        YC.append(yc)
+        ZC.append(zc)
+
+    return XC,YC,ZC
+
+
+def Plot_Centerlines(X,Y,Z):
+##############
+#Plot Centerlines and CutOffs
+##############
+
+
+    #pdb.set_trace()
+    #X.insert(cutoff_times-1,XC)
+    #Y.insert(cutoff_times-1,YC)
+    fig=plt.figure()
+    cm = plt.get_cmap('magma')
+
+    ax = fig.add_subplot(111)
+    ax.set_prop_cycle(color=[cm(1.*i/len(X)) for i in range(len(X))])
+
+    for i in range(0,len(X)):
+            #plt.plot(centerlines_data[i][:,0],centerlines_data[i][:,1],'o')
+        ax.plot(X[i],Y[i],'-')
+
+        #for j in range(0,len(XC)):
+        #   ax.plot(XC[j],YC[j])
+    plt.xlabel('Distance (m)',fontweight='bold',fontsize=20)
+    plt.ylabel('Distance (m)',fontweight='bold',fontsize=20)
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    plt.axis('scaled')
+
+    
+
+    #ax = fig.add_subplot(211)
+
+
+   # for i in range(0,len(X)):
+        #plt.plot(centerlines_data[i][:,0],centerlines_data[i][:,1],'o')
+       # ax.plot(X[i],Y[i],'-')
+
+    #for j in range(0,len(XC)):
+          #ax.plot(XC[j],YC[j])
+
+
+    #plt.axis('scaled')
+
+
+    plt.tight_layout()
+
+    plt.show()
+    
+    #fig=plt.figure()
+    #cm=plt.get_cmap('magma')
+
+    #ax = fig.add_subplot(111)  
+
+    #for i in range(0,len(X)):
+        #plt.plot(centerlines_data[i][:,0],centerlines_data[i][:,1],'o')
+     #   ax.plot(X[i],Y[i],'-')  
+    #plt.savefig('/Users/paulmorris/Documents/Python Research/JoshuaChannel/ForJake', format='svg')
+
+def Plot_Centerlines_Video(X,Y,Z):
+##############
+#Plot Centerlines and CutOffs
+##############
+
+
+    for i in range(len(X),len(X)+1):
+        #plt.plot(centerlines_data[i][:,0],centerlines_data[i][:,1],'o')
+        fig=plt.figure(figsize=(20,10))
+       
+
+        cm = plt.get_cmap('magma')
+        ax = plt.axes(xlim=(0,25000),ylim=(7500,20000))
+        #ax = fig.add_subplot(111)
+
+        #curv = compute_curvature(x,y)
+
+        #if curv>0:
+
+        ax.set_prop_cycle(color=[cm(1.*i/len(X)) for i in range(len(X))])
+
+        for j in range(0,i):
+            ax.plot(X[j],Y[j],'-')
+
+    #for j in range(0,len(XC)):
+      #   ax.plot(XC[j],YC[j])
+
+        #plt.axis('scaled')
+
+
+        plt.tight_layout()
+        #plt.savefig(f"Centerlines 10 to {i}")
+        
+
+def Rotate_Centerlines(x,y,theta):
+
+    ''''Function to Rotate Centerlines by theta (in degrees)'''
+
+    #Ox=1112500
+    #Oy=3101000
+
+    Ox=1130000
+    Oy=3090000
+    theta=theta*(np.pi/180) #convert degrees to radians
+
+    xrotated=Ox+np.cos(theta)*(x-Ox)-np.sin(theta)*(y-Oy)
+    yrotated=Oy+np.sin(theta)*(x-Ox)+np.cos(theta)*(y-Oy)
+    x=xrotated
+    y=yrotated
+
+
+    return x, y
+
+def Translate_Centerlines(X,Y):
+
+    '''TRANSLATES CENTERLINES SO MODEL UPDIP END START IS FROM 0,0 INSTEAD OF CRAZY COORDINATE SYSTEM ASSIGNED IN SEISMIC LIKE (1110000273,30197633)'''
+    
+    #X=np.asarray(X)
+    #Y=np.asarray(Y)
+    #XC=np.asarray(XC)
+    #YC=np.asarray(YC)
+    XMIN,YMIN=[],[]
+    #Xmin=np.amin(X,axis=0)
+    #Ymin=np.amin(Y,axis=0)
+    for i in range(0,len(X)):
+
+        xmin=min(X[i])
+
+        ymin=min(Y[i])
+
+        XMIN.append(xmin)
+        YMIN.append(ymin)
+    #pdb.set_trace()
+    XMIN=min(XMIN)
+    YMIN=min(YMIN)
+
+    X=X-XMIN
+
+    Y=Y-YMIN+10000 #10,000 added to display levees in model properly
+
+    #if len(XC)!=0: #if theres no cut off or you dont want to display it
+        #XC=XC-XMIN
+        #YC=YC-YMIN+10000
+
+        #return X,Y,XC,YC
+
+
+    #else:
+
+    return X,Y
+    #X=list(X)
+    #Y=list(Y)
+    #XC=list(XC)
+   # YC=list(YC)
+
+
+   #NEED TO TRANSFORM ALL THE Z DATA THAT IS IN POSITIVE DEPTH INTO AGGRADATION
+
+
+def Plot_Slopes_Along_Centerlines(Slopes):
+
+    ##slopes=[]
+    #pdb.set_trace()
+    #for i in range(0,len(Z)):
+     #   slopes[i] = np.gradient(Z[i])/DS[i]
+
+    plt.figure()
+
+    for i in range(0,len(Slopes)):
+        plt.plot(Slopes[i])
+    plt.show()
+
+
+def  Levee_Height_Control(surf,x_pix,y_pix,z_pix,TurbidityCurrentHeight,xinds,yinds):
+
+    #z_map[(xinds==x_pix[i]) & (yinds==y_pix[i])] = z_pix[i]
+    #TooHighForMud=[]
+    #height_mud_map=np.ones(np.shape(z_map))
+    #start=timer()
+    height_mud_map=np.ones(np.shape(surf))
+    #centerline=x_pix,y_pix
+
+    #centerline=np.vstack(centerline)
+
+
+    #plt.figure()
+    #plt.plot(x_pix,y_pix)
+    #plt.show()h
+
+    #for i in range(0,len(z_map[0,:])):
+    #for i in range(0,len(centerline[0][:])):
+    for i in range(0,len(x_pix)): #We start at the column most updip and work our way down to the most downdip column of the topographic grid
+
+
+        #centerline_coordinate=centerline[:,i] #The coordinates of the centerline on z_map for column i of z_map
+        #centerline_x_coordinates=x_pix[i]
+
+        #centerline_y_coordinates=y_pix[np.argwhere(x_pix==i)]
+        #pdb.set_trace()
+        #if centerline_x_coordinates.size==0: #Break loop if centerline is not in x column - sometimes happens at edges of grid
+           # continue
+
+        #ThalwegHeight_i=np.empty([len(centerline_x_coordinates)])
+
+
+
+        ThalwegHeight=z_pix[i]
+
+
+        closest_cells_elevation=surf[(xinds==x_pix[i]) & (yinds==y_pix[i])] #this finds the cells on the surface that are closest to the thalwg point
+
+        closest_cells_indicies=np.argwhere((xinds==x_pix[i]) & (yinds==y_pix[i]))
+        #closest_cells_location=np.argwhere(surf[(xinds==x_pix[i]) & (yinds==y_pix[i])])
+        #pdb.set_trace()
+
+        #DeltaZ=(closest_cells_elevation-ThalwegHeight)/TurbidityCurrentHeight
+        #pdb.set_trace()
+        DeltaZ=(closest_cells_elevation-ThalwegHeight)/TurbidityCurrentHeight
+        #DeltaZ=abs(DeltaZ)
+
+        DeltaZ[np.where(DeltaZ>1)]=1 #once youre above turbdiity current height it doesnt matter no deposition
+
+        DeltaZ[np.where(DeltaZ<0)]=0
+
+        #np.where(DeltaZ>1,1,DeltaZ)
+
+        #np.where(DeltaZ<0,0,DeltaZ)
+
+
+        height_mud=1-DeltaZ
+
+        #pdb.set_trace()
+        for j in range(0,len(height_mud)):
+
+           # if height_mud[j]==1:
+
+               #continue
+           # else:
+            height_mud_map[closest_cells_indicies[j][0],closest_cells_indicies[j][1]]=height_mud[j]
+
+    #end=timer()
+
+    #print(end-start)
+    #pdb.set_trace()
+    return height_mud_map
+
+
+def Import_DTWandPG_Centerlines(deltas):
+
+    x,y,z,X,Y,Z,DX,DY,DS,S,Sinuosity,Zmean,CLZjump,Slopes=[],[],[],[],[],[],[],[],[],[],[],[],[],[]
+
+    centerline_files=os.listdir(os.getcwd())
+    centerline_files.sort(key=natural_keys)
+    centerline_files = [x for x in  centerline_files if ".npz" in x]
+
+    #pdb.set_trace()
+
+    for i,centerline in enumerate(centerline_files):
+
+        data=np.load(centerline)
+        #pdb.set_trace()
+        x=data['X']
+
+        y=data['Y']
+
+        z=data['Z']
+        #DTW SAVED THE X,Y and Z data from right to left instead of from left to right
+
+        if not "_0" in centerline:
+
+            x=x[::-1]
+            y=y[::-1]
+            z=z[::-1]
+
+        
+        #theta=40
+        #x,y=Rotate_Centerlines(x,y,theta)
+        
+        #x,y=Translate_Centerlines(x,y)
+
+        dx, dy, dz, ds, s = compute_derivatives(x,y,z)
+
+        slope = dz/ds
+        
+
+        if "_0" in centerline:
+            tck, u = scipy.interpolate.splprep([x,y,z],s=50000)
+
+        else:
+            tck, u = scipy.interpolate.splprep([x,y,z],s=10000)
+
+        unew = np.linspace(0,1,1+s[-1]/deltas)
+
+        out = scipy.interpolate.splev(unew,tck) # resampling
+
+        x, y, z = out[0], out[1], out[2]
+
+        dx, dy, dz, ds, s = compute_derivatives(x,y,z) #Need to add here otherwise s and x,y,z have different lengths
+
+        slope = dz/ds
+
+        sinuosity=np.sum(ds)/np.sum(dx)
+
+        DX.append(dx)
+        DS.append(ds)
+        DY.append(dy)
+        X.append(x)
+        Y.append(y)
+        Z.append(z)
+        S.append(s)
+        Sinuosity.append(sinuosity)
+        Slopes.append(slope)
+
+    #pdb.set_trace()
+
+    Zmean=list(range(0,len(Z)))
+
+    CLZjump=list(range(0,len(Z)))
+
+    for i in range(0,len(Z)):
+
+        Zmean[i]=np.mean(Z[i])
+
+    for j in range(0,len(Z)):
+
+        if j==0:
+
+            CLZjump[j]=0
+
+        else:
+
+            CLZjump[j]=-1*(Zmean[j]-Zmean[j-1]) #Zmean is in DEPTH
+
+
+    Aggradation=np.cumsum(CLZjump)
+
+    ###SCATTERPLOT OF CENTERLINES 3D)
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    #ax = fig.add_subplot(111)
+    #ax.set_zlim(-3200,-2900)
+
+    for i in range(0,len(X)):
+        ax.scatter(X[i],Y[i],-Z[i])
+        #ax.invert_zaxis()
+
+    #ax.legend()
+
+    return X,Y,Z,S,DX,DY,DS,Sinuosity,Zmean,CLZjump,Aggradation,Slopes
+
+
+def Combine_Apparent_Trajectories():
+
+    
+
+    Apparent_files=os.listdir(os.getcwd())
+    Apparent_files.sort(key=natural_keys)
+    Apparent_files = [x for x in  Apparent_files if ".p" in x]
+
+    fig = plt.subplots(figsize=(10,10))
+
+    ax = plt.axes(xlim=(0,7000),ylim=(-100,600))
+
+    ax.set_prop_cycle('color',['red', 'yellow','green','cyan','black','blue','magenta','grey','orange'])
+
+    Label_Names=[['Bend 1','Bend 2'],['Bend 3','Cut-Off'],['Bend 5'],['Bend 6'],['Bend 7'],['Bend 8']]
+    #pdb.set_trace()
+    
+    for i in range(0,len(Apparent_files)):
+
+        f=open('{0}'.format(Apparent_files[i]),'rb')
+
+        ApparentLateralTrajectories, ApparentAggradationTrajectories,LabelNames=pickle.load(f)
+        
+
+       
+
+        for j in range(0,len(ApparentLateralTrajectories)):
+            ax.plot(ApparentLateralTrajectories[j],ApparentAggradationTrajectories[j], label=Label_Names[i][j])
+
+    ax.set_xlabel("Lateral Distance (m)", fontsize=24, weight='bold')
+    ax.set_ylabel("Aggradation Distance  (m)", fontsize=24, weight='bold')
+    ax.tick_params(labelsize=18)
+    ax.legend(loc='best', fontsize=18)
+
+
+
